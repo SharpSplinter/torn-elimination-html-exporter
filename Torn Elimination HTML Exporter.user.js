@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Elimination HTML Exporter
 // @namespace    https://github.com/SharpSplinter/torn-elimination-html-exporter
-// @version      1.4.0
+// @version      1.5.0
 // @description  Export styled Torn HTML newsletters, Discord updates, and full faction Elimination leaderboards.
 // @author       SharpSplinter
 // @homepageURL  https://github.com/SharpSplinter/torn-elimination-html-exporter
@@ -20,7 +20,7 @@
 (function eliminationHtmlExporter(global) {
   'use strict';
 
-  const VERSION = '1.4.0';
+  const VERSION = '1.5.0';
   const API_BASE = 'https://api.torn.com/v2';
   const PDA_API_KEY = '###PDA-APIKEY###';
   const BUTTON_LABELS = Object.freeze({
@@ -31,13 +31,14 @@
   const STORAGE = Object.freeze({
     apiKey: 'tehe.apiKey',
     factionIds: 'tehe.factionIds',
-    history: 'tehe.rankHistory.v1',
-    snapshot: 'tehe.snapshotCache.v1',
+    history: 'tehe.rankHistory.v2',
+    snapshot: 'tehe.snapshotCache.v2',
   });
   const SNAPSHOT_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
   const REQUESTS_PER_MINUTE = 90;
   const REQUEST_START_INTERVAL_MS = Math.ceil(60000 / REQUESTS_PER_MINUTE);
   const MAX_CONCURRENT_REQUESTS = 6;
+  const MEMBER_PROGRESS_CHUNK_SIZE = 10;
 
   const TEAM_STYLES = Object.freeze({
     'rocket scientists': { name: 'Rocket Scientists', badge: 'RS', icon: '🚀', marker: '🟠', color: '#ff9f43' },
@@ -63,11 +64,11 @@
   });
 
   const SPECIAL_ROASTS = Object.freeze({
-    a1ry: () => 'Climbed 21 places, then apparently kept climbing straight out of Elimination.',
-    Five: () => 'Lived up to the name by delivering roughly five fewer attacks than anyone hoped for: a flawless zero.',
+    a1ry: (player) => `Managed ${player.attacks} attacks and still found the fastest route out of the event.${player.movement > 0 ? ` At least that ${player.movement}-place climb gave the exit some momentum.` : ''}`,
+    Five: () => 'Lived up to the name by contributing roughly five fewer attacks than anyone was hoping for: a flawless zero.',
     GORYDAMNREAPER: () => 'Brought the intimidating name, left the attacks at zero, and reaped absolutely nothing.',
-    'Atomic-Toast': () => 'Skipped the atomic part and went directly to toast: zero attacks and an early trip home.',
-    Dscott138: () => 'Vanished so quietly that even the conspiracy board has no attacks to pin on them.',
+    'Atomic-Toast': () => 'Skipped the atomic part and went straight to toast: zero attacks and an early trip home.',
+    Dscott138: () => 'Vanished from the Reptilians so quietly that even the conspiracy board has no attacks to pin on them.',
   });
 
   function escapeHtml(value) {
@@ -134,6 +135,7 @@
   }
 
   function toNumber(value, fallback = 0) {
+    if (value == null || value === '') return fallback;
     const number = Number(value);
     return Number.isFinite(number) ? number : fallback;
   }
@@ -205,8 +207,8 @@
 
   function participantComparator(a, b) {
     return (
-      toNumber(b.score) - toNumber(a.score) ||
       toNumber(b.attacks) - toNumber(a.attacks) ||
+      toNumber(b.score) - toNumber(a.score) ||
       (a.status === 'active' ? 0 : 1) - (b.status === 'active' ? 0 : 1) ||
       String(a.name).localeCompare(String(b.name), undefined, { sensitivity: 'base' }) ||
       toNumber(a.id) - toNumber(b.id)
@@ -248,10 +250,10 @@
       currentTeam = standings.byId.get(competition.teamId).name;
     }
     const previousTeam = prior?.teamName || KNOWN_FORMER_TEAMS[member.id] || '';
-    const hasActivity = competition.score > 0 || competition.attacks > 0;
-    const status = inElimination && currentTeam
+    const hasCurrentTeam = competition.teamId != null;
+    const status = inElimination && hasCurrentTeam
       ? 'active'
-      : inElimination && (hasActivity || previousTeam)
+      : inElimination
         ? 'dropped'
         : 'inactive';
     const teamName = currentTeam || previousTeam;
@@ -370,50 +372,187 @@ ${body}
     return parts.join(' &nbsp; ');
   }
 
+  function newsletterBadgeTextColor(teamName) {
+    const colors = {
+      apex: '#ffffff',
+      'brain surgeons': '#0b1b20',
+      'conspiracy theorists': '#102126',
+      'high voltage': '#07141b',
+      'inanimate objects': '#151619',
+      'loose cannons': '#14161b',
+      reptilians: '#14180e',
+      'rocket scientists': '#151619',
+      'sticks and stones': '#ffffff',
+      'touching grass': '#111700',
+    };
+    return colors[canonicalTeamName(teamName)] || '#151619';
+  }
+
+  function newsletterMovementHtml(player) {
+    if (player.movement > 0) return ` <span style="color:#35d07f;">(+${player.movement})</span>`;
+    if (player.movement < 0) return ` <span style="color:#ff5d73;">(-${Math.abs(player.movement)})</span>`;
+    return '';
+  }
+
+  function newsletterPlacementBadgeHtml(player) {
+    if (player.status === 'dropped') return '<span style="display:inline-block;padding:1px 4px;margin-right:3px;box-sizing:border-box;background:#ff5d73;color:#1b0d10;font-size:10px;font-weight:700;border-radius:3px;">OUT</span>';
+    if (player.allianceRank <= 3) return `<span style="display:inline-block;padding:1px 5px;margin-right:3px;box-sizing:border-box;background:#f2a51a;color:#151619;font-size:10px;font-weight:700;border-radius:3px;">P${player.allianceRank}</span>`;
+    if (player.allianceRank <= 10) return '<span style="display:inline-block;padding:1px 4px;margin-right:3px;box-sizing:border-box;background:#35d07f;color:#101612;font-size:10px;font-weight:700;border-radius:3px;">T10</span>';
+    return '<span style="display:inline-block;padding:1px 4px;margin-right:3px;box-sizing:border-box;background:#4da3ff;color:#101216;font-size:10px;font-weight:700;border-radius:3px;">T15</span>';
+  }
+
+  function newsletterPlayerRowHtml(player) {
+    const team = teamStyle(player.teamName);
+    const isDropped = player.status === 'dropped';
+    const teamRank = !isDropped && player.teamRank ? ` #${player.teamRank}` : '';
+    const cardBackground = isDropped ? '#231a1e' : '#1d1f24';
+    const cardBorder = isDropped ? '#493039' : '#34363b';
+    const teamLead = isDropped ? 'Former ' : '';
+    return `<div style="display:block;width:auto;min-width:0;margin:6px 0;padding:8px;box-sizing:border-box;background:${cardBackground};border:1px solid ${cardBorder};border-left:4px solid ${team.color};border-radius:3px;white-space:normal;overflow-wrap:anywhere;">
+  <div style="display:block;width:auto;box-sizing:border-box;">
+    ${newsletterPlacementBadgeHtml(player)}
+    <strong>A#${player.allianceRank}${newsletterMovementHtml(player)} &bull; F#${player.factionRank}</strong> &mdash;
+    <a href="https://www.torn.com/profiles.php?XID=${player.id}" style="color:${team.color};font-weight:700;text-decoration:none;white-space:normal;overflow-wrap:anywhere;">${escapeHtml(player.name)}</a>
+    &mdash; ${player.attacks.toLocaleString()} attacks
+  </div>
+  <div style="display:block;width:auto;margin-top:3px;box-sizing:border-box;font-size:12px;">
+    <span style="display:inline-block;padding:1px 4px;margin-right:3px;box-sizing:border-box;background:${team.color};color:${newsletterBadgeTextColor(team.name)};font-size:10px;font-weight:700;border-radius:3px;">${escapeHtml(team.badge)}</span>
+    ${teamLead}<span style="color:${team.color};font-weight:700;">${escapeHtml(team.name)}${teamRank}</span>
+  </div>
+</div>`;
+  }
+
+  function newsletterFactionHeaderHtml(faction, index) {
+    const style = factionStyle(faction, index);
+    const outline = style.badge === 'NS' ? '#49305d' : style.badge === 'NA' ? '#25495e' : style.border;
+    return `<div style="display:block;width:auto;min-width:0;margin:17px 0 0;padding:10px 7px;box-sizing:border-box;text-align:center;font-size:17px;font-weight:700;line-height:1.35;color:${style.color};background:${style.background};border:1px solid ${outline};border-left:5px solid ${style.border};border-radius:4px;white-space:normal;overflow-wrap:anywhere;">
+  <span style="display:inline-block;padding:2px 5px;margin-right:3px;box-sizing:border-box;background:${style.border};color:#ffffff;font-size:11px;border-radius:3px;">${escapeHtml(style.badge)}</span>
+  ${escapeHtml(`${faction.tag ? `[${faction.tag}] ` : ''}${String(faction.name || '').toUpperCase()}`)}
+</div>`;
+  }
+
+  function newsletterSectionHeaderHtml(label, color) {
+    return `<div style="display:block;width:auto;margin:13px 0 6px;box-sizing:border-box;text-align:center;font-size:14px;font-weight:700;color:${color};">
+  ${escapeHtml(label)}
+</div>`;
+  }
+
+  function countWord(value) {
+    const words = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen'];
+    return words[value] || String(value);
+  }
+
+  function newsletterFactionSummaryHtml(faction, group, index) {
+    const style = factionStyle(faction, index);
+    const topThree = group.filter((player) => player.allianceRank <= 3).length;
+    const topTen = group.filter((player) => player.allianceRank <= 10).length;
+    const topFifteenOnly = group.filter((player) => player.allianceRank > 10 && player.allianceRank <= 15).length;
+    const background = style.badge === 'NS' ? 'rgba(168,85,247,0.10)' : style.badge === 'NA' ? 'rgba(31,158,216,0.10)' : style.background;
+    let summary;
+    if (style.badge === 'NS' && topThree === 3) {
+      summary = `${escapeHtml(faction.name)} controls <strong>${countWord(topTen)} places in the alliance top ten</strong>, including a clean sweep of the podium${topFifteenOnly ? `, with ${countWord(topFifteenOnly)} more member${topFifteenOnly === 1 ? '' : 's'} inside the top fifteen` : ''}.`;
+    } else if (style.badge === 'NA' && group.length === 2 && group.every((player) => player.allianceRank <= 8)) {
+      summary = 'Both Sanctuary representatives remain inside the <strong>alliance top eight</strong> while holding first and second place within their faction.';
+    } else {
+      const pieces = [];
+      if (topThree) pieces.push(`<strong>${topThree} podium place${topThree === 1 ? '' : 's'}</strong>`);
+      if (topTen) pieces.push(`<strong>${topTen} alliance top-ten place${topTen === 1 ? '' : 's'}</strong>`);
+      if (topFifteenOnly) pieces.push(`<strong>${topFifteenOnly} additional top-fifteen place${topFifteenOnly === 1 ? '' : 's'}</strong>`);
+      summary = pieces.length ? `${escapeHtml(faction.name)} currently holds ${pieces.join(', ')}.` : `${escapeHtml(faction.name)} is still hunting for its first alliance top-fifteen position.`;
+    }
+    return `<div style="display:block;width:auto;min-width:0;margin:10px 0 0;padding:8px;box-sizing:border-box;background:${background};border-radius:4px;font-size:12px;line-height:1.5;white-space:normal;overflow-wrap:anywhere;">
+  ${summary}
+</div>`;
+  }
+
+  function newsletterShell(body) {
+    return `<!-- Torn Elimination HTML Exporter v${VERSION} -->
+<div style="display:block;width:auto;max-width:601px;min-width:0;margin:0 auto;padding:0;box-sizing:border-box;">
+  <div style="display:block;width:auto;min-width:0;margin:0;padding:9px;box-sizing:border-box;background:#151619;color:#f2f2f2;font-family:Arial,Verdana,sans-serif;font-size:13px;line-height:1.5;border:1px solid #34363b;border-radius:8px;white-space:normal;overflow-wrap:anywhere;word-wrap:break-word;">
+${body}
+  </div>
+</div>`;
+  }
+
+  function newsletterHeaderHtml() {
+    return `    <div style="display:block;width:auto;margin:5px 0 0;box-sizing:border-box;text-align:center;color:#ffffff;font-size:22px;font-weight:700;line-height:1.25;white-space:normal;overflow-wrap:anywhere;">
+      <img src="https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/1f3c6.png" alt="Trophy" width="25" height="25" style="display:inline-block !important;width:25px !important;height:25px !important;max-width:25px !important;margin:0 5px 0 0 !important;padding:0;border:0;float:none !important;clear:none !important;vertical-align:middle;box-sizing:border-box;">
+      ELIMINATION
+    </div>
+    <div style="display:block;width:auto;margin:0;box-sizing:border-box;text-align:center;color:#ffffff;font-size:22px;font-weight:700;line-height:1.25;white-space:normal;overflow-wrap:anywhere;">
+      ALLIANCE UPDATE
+    </div>
+    <div style="display:block;width:auto;margin:14px 0 0;box-sizing:border-box;text-align:center;font-size:12px;font-weight:700;line-height:2;white-space:normal;">
+      <span style="display:inline-block;margin:0 4px;color:#f2a51a;"><span style="display:inline-block;padding:1px 5px;box-sizing:border-box;background:#f2a51a;color:#151619;border-radius:3px;">1-3</span> Podium</span>
+      <span style="display:inline-block;margin:0 4px;color:#35d07f;">Top 10</span>
+      <span style="display:inline-block;margin:0 4px;color:#4da3ff;">Top 15</span>
+      <span style="display:inline-block;margin:0 4px;color:#ff5d73;">Dropped Out</span>
+    </div>
+    <div style="display:block;width:auto;margin:6px 0 0;box-sizing:border-box;text-align:center;font-size:12px;font-weight:700;line-height:2;white-space:normal;">
+      <span style="display:inline-block;margin:0 5px;color:#f2a51a;"><span style="display:inline-block;padding:1px 6px;box-sizing:border-box;background:#f2a51a;color:#151619;border-radius:3px;">A</span> Alliance Rank</span>
+      <span style="display:inline-block;margin:0 5px;color:#4da3ff;"><span style="display:inline-block;padding:1px 6px;box-sizing:border-box;background:#4da3ff;color:#101216;border-radius:3px;">F</span> Faction Rank</span>
+    </div>
+    <div style="display:block;width:auto;height:2px;margin:14px 0 0;padding:0;box-sizing:border-box;background:linear-gradient(90deg,#f2a51a,#4da3ff);border-radius:2px;"></div>`;
+  }
+
   function buildNewsletterHtml(snapshot) {
     const players = snapshot.players || [];
     const factions = snapshot.factions || [];
     const activeTop = players.filter((player) => player.status === 'active' && player.allianceRank <= 15);
     const dropped = players.filter((player) => player.status === 'dropped');
-    const parts = [headerBlock('ELIMINATION ALLIANCE UPDATE', newsletterLegendHtml())];
+    const parts = [newsletterHeaderHtml()];
 
     factions.forEach((faction, index) => {
       const group = activeTop.filter((player) => player.factionId === faction.id);
       if (!group.length) return;
-      parts.push(factionHeaderHtml(faction, index));
+      parts.push(newsletterFactionHeaderHtml(faction, index));
       const podium = group.filter((player) => player.allianceRank <= 3);
       const topTen = group.filter((player) => player.allianceRank > 3 && player.allianceRank <= 10);
       const topFifteen = group.filter((player) => player.allianceRank > 10 && player.allianceRank <= 15);
       if (podium.length) {
-        parts.push(sectionHeaderHtml('P', 'PODIUM', '#ffd166'));
-        parts.push(...podium.map(playerRowHtml));
+        parts.push(newsletterSectionHeaderHtml('PODIUM', '#f2a51a'));
+        parts.push(...podium.map(newsletterPlayerRowHtml));
       }
       if (topTen.length) {
-        parts.push(sectionHeaderHtml('T10', 'ALLIANCE TOP 10', '#35d07f'));
-        parts.push(...topTen.map(playerRowHtml));
+        parts.push(newsletterSectionHeaderHtml('ALLIANCE TOP 10', '#35d07f'));
+        parts.push(...topTen.map(newsletterPlayerRowHtml));
       }
       if (topFifteen.length) {
-        parts.push(sectionHeaderHtml('T15', 'ALLIANCE TOP 15', '#4da3ff'));
-        parts.push(...topFifteen.map(playerRowHtml));
+        parts.push(newsletterSectionHeaderHtml('ALLIANCE TOP 15', '#4da3ff'));
+        parts.push(...topFifteen.map(newsletterPlayerRowHtml));
       }
-      parts.push(`<div style="width:100%;max-width:100%;box-sizing:border-box;margin:14px 0 0;color:#d7d9dd;line-height:1.55;overflow-wrap:anywhere;word-break:break-word;">${escapeHtml(factionSummary(group))}</div>`);
+      parts.push(newsletterFactionSummaryHtml(faction, group, index));
     });
 
     if (dropped.length) {
-      parts.push(`<div style="width:100%;max-width:100%;box-sizing:border-box;margin:28px 0 8px;padding:11px 8px;text-align:center;font-size:20px;line-height:1.35;font-weight:700;color:#ff5d73;background:#31191f;border:1px solid #ff5d73;border-radius:5px;overflow:hidden;overflow-wrap:anywhere;word-break:break-word;">${compactBadgeHtml('OUT', '#ff5d73', '#ffffff')} DROPPED OUT - WALL OF SHAME</div>`);
+      parts.push(`<div style="display:block;width:auto;min-width:0;margin:19px 0 0;padding:10px 6px;box-sizing:border-box;text-align:center;font-size:17px;font-weight:700;line-height:1.35;color:#ff788a;background:linear-gradient(90deg,#30171d,#411c25,#30171d);border:1px solid #ff5d73;border-radius:4px;white-space:normal;overflow-wrap:anywhere;">
+  <span style="display:inline-block;padding:2px 5px;margin-right:3px;box-sizing:border-box;background:#ff5d73;color:#1b0d10;font-size:10px;border-radius:3px;">OUT</span>
+  DROPPED OUT &mdash; WALL OF SHAME
+</div>`);
       factions.forEach((faction, index) => {
         const group = dropped.filter((player) => player.factionId === faction.id);
         if (!group.length) return;
-        parts.push(factionHeaderHtml(faction, index));
+        const style = factionStyle(faction, index);
+        parts.push(`<div style="display:block;width:auto;margin:14px 0 6px;box-sizing:border-box;text-align:center;font-size:14px;font-weight:700;color:${style.color};white-space:normal;overflow-wrap:anywhere;">
+  ${escapeHtml(`${faction.tag ? `[${faction.tag}] ` : ''}${String(faction.name || '').toUpperCase()}`)}
+</div>`);
         for (const player of group) {
-          parts.push(playerRowHtml(player));
-          parts.push(`<div style="width:100%;max-width:100%;box-sizing:border-box;margin:-2px 0 13px;padding:0 8px;color:#ffadb8;font-style:italic;line-height:1.5;overflow-wrap:anywhere;word-break:break-word;"><span style="font-weight:700;">CALL-OUT:</span> ${escapeHtml(roastPlayer(player))}</div>`);
+          parts.push(newsletterPlayerRowHtml(player));
+          parts.push(`<div style="display:block;width:auto;min-width:0;margin:0 0 8px;padding:7px 8px;box-sizing:border-box;background:rgba(255,93,115,0.08);font-size:12px;font-style:italic;line-height:1.45;border-radius:3px;white-space:normal;overflow-wrap:anywhere;">
+  <strong>BURN:</strong> ${escapeHtml(roastPlayer(player))}
+</div>`);
         }
       });
     }
 
-    parts.push('<div style="width:100%;max-width:100%;box-sizing:border-box;margin-top:25px;text-align:center;font-weight:700;color:#9ca3ad;overflow-wrap:anywhere;word-break:break-word;">Keep swinging, keep climbing - and if you drop out, at least give the newsletter something funny to write.</div>');
-    return documentShell(parts.join('\n'));
+    parts.push(`<div style="display:block;width:auto;min-width:0;margin:17px 0 0;padding:9px 5px;box-sizing:border-box;text-align:center;font-size:12px;font-weight:700;line-height:1.5;border-top:1px solid #3b3e44;white-space:normal;overflow-wrap:anywhere;">
+  Keep swinging, keep climbing &mdash; and if you drop out, at least give the newsletter something funny to write.
+</div>
+<div style="display:block;width:auto;margin:8px 0 0;box-sizing:border-box;text-align:center;font-size:10px;line-height:1.4;">
+  Trophy artwork: <a href="https://github.com/twitter/twemoji" style="color:#aeb3ba;text-decoration:none;">Twemoji</a>,
+  <a href="https://creativecommons.org/licenses/by/4.0/" style="color:#aeb3ba;text-decoration:none;">CC BY 4.0</a>.
+</div>`);
+    return newsletterShell(parts.join('\n'));
   }
 
   function buildLeaderboardHtml(snapshot) {
@@ -694,21 +833,73 @@ ${body}
     return toNumber(source.id ?? source.ID, null);
   }
 
-  async function collectSnapshot(apiKey, factionIds, onProgress = () => {}) {
+  function completedProgressChunks(completed, total, chunkSize = MEMBER_PROGRESS_CHUNK_SIZE) {
+    if (!total) return 0;
+    const totalChunks = Math.ceil(total / chunkSize);
+    return completed >= total ? totalChunks : Math.floor(completed / chunkSize);
+  }
+
+  async function collectSnapshot(apiKey, factionIds, onProgress = () => {}, options = {}) {
     const schedule = createRequestScheduler();
+    const apiOffset = Math.max(0, Math.floor(toNumber(options.apiOffset, 0)));
+    const rosterApiCalls = 1 + (factionIds.length * 2);
+    let apiStarted = apiOffset;
+    let apiCompleted = apiOffset;
+    let apiTotal = apiOffset + rosterApiCalls;
+    let membersCompleted = 0;
+    let membersTotal = null;
+    let chunksTotal = null;
+    let phase = 'rosters';
+
+    const emitProgress = (message, overrides = {}) => {
+      let percent = 5;
+      if (phase === 'rosters') {
+        const rosterCompleted = Math.max(0, apiCompleted - apiOffset);
+        percent = 5 + Math.round((Math.min(rosterCompleted, rosterApiCalls) / Math.max(1, rosterApiCalls)) * 20);
+      } else if (phase === 'members') {
+        percent = 25 + Math.round((membersCompleted / Math.max(1, membersTotal || 0)) * 70);
+      } else if (phase === 'finalizing') {
+        percent = 98;
+      }
+      onProgress({
+        phase,
+        message,
+        percent,
+        apiStarted,
+        apiCompleted,
+        apiTotal,
+        membersCompleted,
+        membersTotal,
+        chunksCompleted: completedProgressChunks(membersCompleted, membersTotal),
+        chunksTotal,
+        chunkSize: MEMBER_PROGRESS_CHUNK_SIZE,
+        ...overrides,
+      });
+    };
+
     const scheduledApiGet = async (path, retry = 0) => {
       try {
-        return await schedule(() => apiGet(path, apiKey));
+        return await schedule(async () => {
+          apiStarted += 1;
+          emitProgress(`Calling Torn API at up to ${REQUESTS_PER_MINUTE} requests/minute…`);
+          try {
+            return await apiGet(path, apiKey);
+          } finally {
+            apiCompleted += 1;
+            emitProgress('Processing the latest Torn API response…');
+          }
+        });
       } catch (error) {
         const rateLimited = /HTTP 429|Torn API error 5\b|too many requests/i.test(String(error?.message || error));
         if (!rateLimited || retry >= 2) throw error;
-        onProgress(`Torn rate limit reached; retrying safely in ${(retry + 1) * 5} seconds…`);
+        apiTotal += 1;
+        emitProgress(`Torn rate limit reached; retrying safely in ${(retry + 1) * 5} seconds…`);
         await sleep((retry + 1) * 5000);
         return scheduledApiGet(path, retry + 1);
       }
     };
 
-    onProgress(`Loading faction rosters and team standings at up to ${REQUESTS_PER_MINUTE} calls/minute…`);
+    emitProgress(`Loading ${factionIds.length} faction roster${factionIds.length === 1 ? '' : 's'} and Elimination team standings…`);
     const [standingsPayload, factionPayloads] = await Promise.all([
       scheduledApiGet('/torn/elimination').catch(() => ({ elimination: [] })),
       Promise.all(factionIds.map(async (id) => {
@@ -725,15 +916,22 @@ ${body}
     const members = factionPayloads.flatMap((entry) => entry.members);
     const previousHistory = readHistory(await storageGet(STORAGE.history, {}));
 
-    let completed = 0;
+    phase = 'members';
+    membersTotal = members.length;
+    chunksTotal = Math.ceil(membersTotal / MEMBER_PROGRESS_CHUNK_SIZE);
+    apiTotal += membersTotal;
+    emitProgress(`Loading Elimination records for ${membersTotal} member${membersTotal === 1 ? '' : 's'} in ${chunksTotal} progress chunk${chunksTotal === 1 ? '' : 's'}…`);
     const records = await Promise.all(members.map(async (member) => {
       const payload = await scheduledApiGet(`/user/${member.id}/competition`);
       const record = classifyMember(member, normalizeCompetition(payload), previousHistory[member.id], standings);
-      completed += 1;
-      onProgress(`Loading Elimination records… ${completed}/${members.length} (target ${REQUESTS_PER_MINUTE} calls/minute)`);
+      membersCompleted += 1;
+      const currentChunk = Math.min(chunksTotal, Math.max(1, Math.ceil(membersCompleted / MEMBER_PROGRESS_CHUNK_SIZE)));
+      emitProgress(`Loaded member ${membersCompleted} of ${membersTotal} — progress chunk ${currentChunk} of ${chunksTotal}.`);
       return record;
     }));
 
+    phase = 'finalizing';
+    emitProgress('Calculating alliance, faction, and team rankings…');
     const players = assignRanks(records.filter((player) => player.status !== 'inactive'), previousHistory);
     await storageSet(STORAGE.history, serializeHistory(players));
     return { factions, players, generatedAt: new Date().toISOString() };
@@ -799,8 +997,32 @@ ${body}
     return supplied;
   }
 
-  async function resolveFactionScope(apiKey) {
+  async function resolveFactionScope(apiKey, onProgress = () => {}) {
+    onProgress({
+      phase: 'scope',
+      message: 'Loading your current faction before choosing the export scope…',
+      percent: 3,
+      apiStarted: 1,
+      apiCompleted: 0,
+      apiTotal: 1,
+      membersCompleted: 0,
+      membersTotal: null,
+      chunksCompleted: 0,
+      chunksTotal: null,
+    });
     const currentId = await currentFactionId(apiKey);
+    onProgress({
+      phase: 'scope',
+      message: 'Current faction loaded. Confirm the faction or alliance scope.',
+      percent: 5,
+      apiStarted: 1,
+      apiCompleted: 1,
+      apiTotal: 1,
+      membersCompleted: 0,
+      membersTotal: null,
+      chunksCompleted: 0,
+      chunksTotal: null,
+    });
     const saved = await storageGet(STORAGE.factionIds, []);
     const defaults = Array.isArray(saved) && saved.length ? saved : currentId ? [currentId] : [];
     const supplied = global.prompt(
@@ -836,56 +1058,135 @@ ${body}
     } catch { return false; }
   }
 
-  function showCopyFallback(html) {
+  function createProgressDialog(kind) {
+    global.document.getElementById('tehe-progress-overlay')?.remove();
     const overlay = global.document.createElement('div');
-    overlay.id = 'tehe-copy-fallback';
-    overlay.innerHTML = `<div style="width:min(92vw,700px);background:#202225;border:1px solid #555;border-radius:8px;padding:16px;color:#fff;box-shadow:0 12px 40px #000;">
-  <div style="font-weight:700;margin-bottom:10px;">Copy the generated Torn HTML</div>
-  <textarea style="width:100%;height:60vh;box-sizing:border-box;background:#111;color:#eee;border:1px solid #555;padding:10px;">${escapeHtml(html)}</textarea>
-  <button type="button" style="margin-top:10px;padding:9px 14px;">Close</button>
+    overlay.id = 'tehe-progress-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', 'tehe-progress-title');
+    overlay.innerHTML = `<div style="display:block;width:min(92vw,460px);max-height:90vh;overflow:auto;box-sizing:border-box;padding:16px;background:#202225;color:#f2f3f5;border:1px solid #555b64;border-radius:9px;box-shadow:0 14px 45px #000;font-family:Arial,sans-serif;">
+  <div id="tehe-progress-title" style="font-size:16px;font-weight:700;line-height:1.35;overflow-wrap:anywhere;">Preparing ${kind === 'discord' ? 'Discord' : kind === 'leaderboard' ? 'Full Faction' : 'Torn HTML'} Export</div>
+  <div data-progress-phase style="margin-top:5px;color:#9da3ad;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;">Starting</div>
+  <div style="display:flex;justify-content:space-between;gap:8px;margin-top:12px;font-size:12px;"><span data-progress-message>Preparing export…</span><strong data-progress-percent>0%</strong></div>
+  <div role="progressbar" aria-label="Export loading progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="display:block;width:100%;height:12px;margin-top:7px;box-sizing:border-box;overflow:hidden;background:#111318;border:1px solid #454a52;border-radius:7px;">
+    <div data-progress-bar style="display:block;width:0%;height:100%;box-sizing:border-box;background:linear-gradient(90deg,#f2a51a,#35d07f,#4da3ff);transition:width .2s ease;"></div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));gap:6px;margin-top:11px;font-size:11px;">
+    <div data-api-count style="padding:7px;background:#17191d;border:1px solid #34373c;border-radius:4px;">API requests: discovering…</div>
+    <div data-member-count style="padding:7px;background:#17191d;border:1px solid #34373c;border-radius:4px;">Members: discovering…</div>
+    <div data-chunk-count style="padding:7px;background:#17191d;border:1px solid #34373c;border-radius:4px;">Chunks: discovering…</div>
+  </div>
+  <div data-cache-note hidden style="margin-top:8px;padding:7px;background:#17271f;color:#55d98a;border:1px solid #315c42;border-radius:4px;font-size:11px;font-weight:700;">Fresh five-minute cache reused — no Torn API calls were made.</div>
+  <div data-export-output hidden style="margin-top:13px;padding-top:12px;border-top:1px solid #3c4047;">
+    <div data-output-summary style="font-size:12px;font-weight:700;color:#55d98a;">Export ready. Nothing has been copied yet.</div>
+    <label data-message-label hidden style="display:block;margin-top:9px;color:#c7cbd1;font-size:11px;font-weight:700;">Discord message
+      <select data-message-picker style="display:block;width:100%;margin-top:4px;padding:7px;box-sizing:border-box;background:#151619;color:#f2f3f5;border:1px solid #555b64;border-radius:4px;"></select>
+    </label>
+    <textarea data-output-preview readonly aria-label="Generated export preview" style="display:block;width:100%;height:130px;margin-top:9px;padding:8px;box-sizing:border-box;resize:vertical;background:#0f1012;color:#e8e9eb;border:1px solid #555b64;border-radius:4px;font:11px/1.4 monospace;white-space:pre-wrap;"></textarea>
+    <button type="button" data-copy-output style="display:inline-block;margin-top:10px;padding:8px 12px;box-sizing:border-box;background:#287c4d;color:#ffffff;border:1px solid #4bb878;border-radius:5px;font-weight:700;cursor:pointer;">Copy to Clipboard</button>
+  </div>
+  <button type="button" data-close-progress hidden style="display:inline-block;margin:10px 0 0 7px;padding:8px 12px;box-sizing:border-box;background:#34383f;color:#f2f3f5;border:1px solid #5a606a;border-radius:5px;font-weight:700;cursor:pointer;">Close</button>
 </div>`;
-    Object.assign(overlay.style, { position: 'fixed', inset: '0', zIndex: '2147483647', background: '#000b', display: 'grid', placeItems: 'center' });
-    overlay.querySelector('button').addEventListener('click', () => overlay.remove());
-    global.document.body.appendChild(overlay);
-    overlay.querySelector('textarea').select();
-  }
-
-  async function deliverHtml(html) {
-    const copied = await copyText(html);
-    if (!copied) showCopyFallback(html);
-    return copied;
-  }
-
-  function showDiscordMessages(messages) {
-    global.document.getElementById('tehe-discord-messages')?.remove();
-    const overlay = global.document.createElement('div');
-    overlay.id = 'tehe-discord-messages';
-    const sections = messages.map((message, index) => `<section style="margin:10px 0;padding:10px;background:#17191d;border:1px solid #45484f;border-radius:6px;">
-  <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:7px;"><strong>Discord message ${index + 1} of ${messages.length}</strong><button type="button" data-copy-message="${index}" style="padding:6px 9px;cursor:pointer;">Copy message ${index + 1}</button></div>
-  <textarea readonly style="display:block;width:100%;height:150px;box-sizing:border-box;resize:vertical;background:#0f1012;color:#eee;border:1px solid #555;padding:8px;white-space:pre-wrap;">${escapeHtml(message)}</textarea>
-</section>`).join('');
-    overlay.innerHTML = `<div style="width:min(94vw,760px);max-height:90vh;box-sizing:border-box;overflow:auto;background:#202225;border:1px solid #555;border-radius:8px;padding:14px;color:#fff;box-shadow:0 12px 40px #000;">
-  <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;"><strong>Discord Elimination Update</strong><button type="button" data-close-discord style="padding:6px 10px;cursor:pointer;">Close</button></div>
-  <div style="margin-top:6px;color:#c7cbd1;font-size:12px;">Paste each message into Discord in numbered order. Message 1 was copied automatically when clipboard access was available.</div>
-  ${sections}
-</div>`;
-    Object.assign(overlay.style, { position: 'fixed', inset: '0', zIndex: '2147483647', background: '#000b', display: 'grid', placeItems: 'center' });
-    overlay.querySelector('[data-close-discord]').addEventListener('click', () => overlay.remove());
-    overlay.querySelectorAll('[data-copy-message]').forEach((button) => {
-      button.addEventListener('click', async () => {
-        const index = Number(button.dataset.copyMessage);
-        const copied = await copyText(messages[index]);
-        button.textContent = copied ? `Copied message ${index + 1}` : `Select message ${index + 1} below`;
-        if (!copied) button.closest('section').querySelector('textarea').select();
-      });
+    Object.assign(overlay.style, {
+      position: 'fixed', inset: '0', zIndex: '2147483646', padding: '12px', boxSizing: 'border-box',
+      background: '#000b', display: 'grid', placeItems: 'center',
     });
     global.document.body.appendChild(overlay);
-  }
 
-  async function deliverDiscord(messages) {
-    const copied = await copyText(messages[0] || '');
-    showDiscordMessages(messages);
-    return copied;
+    const dialog = overlay.firstElementChild;
+    const progressBar = overlay.querySelector('[role="progressbar"]');
+    const bar = overlay.querySelector('[data-progress-bar]');
+    const phase = overlay.querySelector('[data-progress-phase]');
+    const message = overlay.querySelector('[data-progress-message]');
+    const percent = overlay.querySelector('[data-progress-percent]');
+    const apiCount = overlay.querySelector('[data-api-count]');
+    const memberCount = overlay.querySelector('[data-member-count]');
+    const chunkCount = overlay.querySelector('[data-chunk-count]');
+    const cacheNote = overlay.querySelector('[data-cache-note]');
+    const output = overlay.querySelector('[data-export-output]');
+    const outputSummary = overlay.querySelector('[data-output-summary]');
+    const preview = overlay.querySelector('[data-output-preview]');
+    const pickerLabel = overlay.querySelector('[data-message-label]');
+    const picker = overlay.querySelector('[data-message-picker]');
+    const copyButton = overlay.querySelector('[data-copy-output]');
+    const closeButton = overlay.querySelector('[data-close-progress]');
+    let current = { percent: 0 };
+    let exportItems = [];
+
+    const countText = (label, completed, total, suffix = '') => {
+      if (total == null) return `${label}: discovering…`;
+      return `${label}: ${completed || 0} / ${total}${suffix}`;
+    };
+
+    const selectedExportIndex = () => Math.max(0, Math.min(exportItems.length - 1, Number(picker.value) || 0));
+    const displaySelectedExport = () => {
+      preview.value = exportItems[selectedExportIndex()] || '';
+    };
+
+    function update(next) {
+      const updateValue = typeof next === 'string' ? { message: next } : (next || {});
+      current = { ...current, ...updateValue };
+      const value = Math.max(0, Math.min(100, Math.round(toNumber(current.percent, 0))));
+      bar.style.width = `${value}%`;
+      percent.textContent = `${value}%`;
+      progressBar.setAttribute('aria-valuenow', String(value));
+      phase.textContent = String(current.phase || 'Loading').replace(/\b\w/g, (letter) => letter.toUpperCase());
+      message.textContent = current.message || 'Preparing export…';
+      apiCount.textContent = countText('API requests', current.apiCompleted, current.apiTotal, current.cacheHit ? ' (cache)' : '');
+      memberCount.textContent = countText('Members', current.membersCompleted, current.membersTotal, current.cacheHit ? ' cached' : '');
+      chunkCount.textContent = countText('Chunks', current.chunksCompleted, current.chunksTotal, current.chunkSize ? ` (${current.chunkSize} members each)` : '');
+      cacheNote.hidden = !current.cacheHit;
+    }
+
+    function completeWithExport(payload) {
+      exportItems = (Array.isArray(payload) ? payload : [payload]).map((item) => String(item || ''));
+      picker.replaceChildren();
+      exportItems.forEach((item, index) => {
+        const option = global.document.createElement('option');
+        option.value = String(index);
+        option.textContent = `Message ${index + 1} of ${exportItems.length} (${item.length.toLocaleString()} characters)`;
+        picker.appendChild(option);
+      });
+      pickerLabel.hidden = kind !== 'discord' || exportItems.length <= 1;
+      displaySelectedExport();
+      output.hidden = false;
+      closeButton.hidden = false;
+      update({ phase: 'complete', message: 'Export generated. Review it below, then copy when ready.', percent: 100 });
+      outputSummary.textContent = exportItems.length > 1
+        ? `${exportItems.length} Discord messages are ready. Select and copy each one in order.`
+        : 'Export ready. Nothing has been copied yet.';
+      dialog.scrollTop = dialog.scrollHeight;
+    }
+
+    function fail(errorMessage) {
+      update({ phase: 'error', message: errorMessage || 'Export failed.' });
+      message.style.color = '#ff7b8d';
+      bar.style.background = '#ff5d73';
+      closeButton.hidden = false;
+    }
+
+    picker.addEventListener('change', displaySelectedExport);
+    copyButton.addEventListener('click', async () => {
+      const index = selectedExportIndex();
+      const copied = await copyText(exportItems[index] || '');
+      if (copied) {
+        outputSummary.textContent = exportItems.length > 1
+          ? `Copied Discord message ${index + 1} of ${exportItems.length}. The generated messages remain available here.`
+          : 'Copied to the clipboard. The generated export remains available here for re-copying.';
+        outputSummary.style.color = '#55d98a';
+        copyButton.textContent = 'Copy to Clipboard Again';
+      } else {
+        outputSummary.textContent = 'Clipboard permission was unavailable. The export is selected below for manual copying.';
+        outputSummary.style.color = '#ffcf66';
+        preview.focus();
+        preview.select();
+      }
+    });
+    closeButton.addEventListener('click', () => overlay.remove());
+    update(current);
+
+    return { update, completeWithExport, fail, close: () => overlay.remove() };
   }
 
   function setStatus(message, tone = 'normal') {
@@ -899,59 +1200,94 @@ ${body}
     loadCache: () => storageGet(STORAGE.snapshot, null),
     saveCache: (entry) => storageSet(STORAGE.snapshot, entry),
     fetchSnapshot: async (onProgress) => {
+      onProgress({ phase: 'preparing', message: 'Checking API access and saved export settings…', percent: 1 });
       const apiKey = await resolveApiKey();
-      const factionIds = await resolveFactionScope(apiKey);
-      return collectSnapshot(apiKey, factionIds, onProgress);
+      const factionIds = await resolveFactionScope(apiKey, onProgress);
+      return collectSnapshot(apiKey, factionIds, onProgress, { apiOffset: 1 });
     },
     onCacheHit: (entry, now, onProgress) => {
       const secondsRemaining = Math.max(1, Math.ceil((SNAPSHOT_CACHE_MAX_AGE_MS - (now - entry.cachedAt)) / 1000));
-      onProgress(`Using cached live data; refresh required in ${secondsRemaining} seconds.`);
+      const membersTotal = entry.snapshot.players.length;
+      const chunksTotal = Math.ceil(membersTotal / MEMBER_PROGRESS_CHUNK_SIZE);
+      onProgress({
+        phase: 'cache',
+        message: `Using cached live data; a fresh API lookup is required in ${secondsRemaining} seconds.`,
+        percent: 95,
+        cacheHit: true,
+        apiStarted: 0,
+        apiCompleted: 0,
+        apiTotal: 0,
+        membersCompleted: membersTotal,
+        membersTotal,
+        chunksCompleted: chunksTotal,
+        chunksTotal,
+        chunkSize: MEMBER_PROGRESS_CHUNK_SIZE,
+      });
     },
   });
 
   async function runExport(kind, buttons) {
+    const progressDialog = createProgressDialog(kind);
     buttons.forEach((button) => { button.disabled = true; });
     try {
       setStatus('Preparing export…');
-      const snapshot = await getExportSnapshot((message) => setStatus(message));
+      const snapshot = await getExportSnapshot((progress) => {
+        progressDialog.update(progress);
+        setStatus(typeof progress === 'string' ? progress : progress.message);
+      });
+      progressDialog.update({ phase: 'rendering', message: 'Applying the approved styling and formatting…', percent: 99 });
       if (kind === 'discord') {
         const messages = buildDiscordMessages(snapshot);
-        const copied = await deliverDiscord(messages);
-        setStatus(copied ? `Copied Discord message 1 of ${messages.length}; use the open panel for the rest.` : 'Use the open panel to copy each Discord message.', copied ? 'success' : 'normal');
+        progressDialog.completeWithExport(messages);
+        setStatus(`${messages.length} Discord message${messages.length === 1 ? '' : 's'} ready to copy.`, 'success');
       } else {
         const html = kind === 'newsletter' ? buildNewsletterHtml(snapshot) : buildLeaderboardHtml(snapshot);
-        const copied = await deliverHtml(html);
-        setStatus(copied ? 'Copied Torn HTML to the clipboard.' : 'Clipboard access was unavailable; use the open copy box.', copied ? 'success' : 'normal');
+        progressDialog.completeWithExport(html);
+        setStatus('Torn HTML ready to copy.', 'success');
       }
     } catch (error) {
-      setStatus(error?.message || 'Export failed.', error?.message === 'Export cancelled.' ? 'normal' : 'error');
+      const errorMessage = error?.message || 'Export failed.';
+      progressDialog.fail(errorMessage);
+      setStatus(errorMessage, errorMessage === 'Export cancelled.' ? 'normal' : 'error');
     } finally {
       buttons.forEach((button) => { button.disabled = false; });
     }
   }
 
+  function findEliminationHeader() {
+    if (!global.document) return null;
+    const matches = (selector) => [...global.document.querySelectorAll(selector)].filter((element) => {
+      if (element.closest('#tehe-export-controls')) return false;
+      return /^elimination$/i.test(String(element.textContent || '').trim());
+    });
+    const semantic = matches('h1,h2,h3,h4,h5,[role="heading"]');
+    if (semantic.length) return semantic[0];
+    const titled = matches('#mainContainer [class*="title"],main [class*="title"]')
+      .filter((element) => !/^(A|BUTTON)$/i.test(element.tagName));
+    return titled.find((element) => !titled.some((other) => other !== element && element.contains(other))) || null;
+  }
+
   function createPanel() {
-    if (!global.document?.body || global.document.getElementById('tehe-export-panel')) return;
-    const panel = global.document.createElement('section');
-    panel.id = 'tehe-export-panel';
+    if (!global.document?.body || global.document.getElementById('tehe-export-controls')) return;
+    const header = findEliminationHeader();
+    if (!header) return;
+    const panel = global.document.createElement('span');
+    panel.id = 'tehe-export-controls';
     panel.setAttribute('aria-label', 'Elimination exports');
     panel.innerHTML = `<style>
-  #tehe-export-panel{position:fixed;right:14px;bottom:14px;z-index:999999;width:min(360px,calc(100vw - 28px));box-sizing:border-box;padding:12px;background:#202225ee;border:1px solid #45484f;border-radius:9px;box-shadow:0 8px 28px #0009;font:13px Arial,sans-serif;color:#f2f3f5}
-  #tehe-export-panel .tehe-title{text-align:center;font-weight:700;margin:0 0 8px;color:#fff}
-  #tehe-export-panel button{display:block;width:100%;margin:7px 0;padding:9px 10px;border:1px solid #59606a;border-radius:6px;background:#30343a;color:#f7f7f7;font-weight:700;line-height:1.3;text-align:left;cursor:pointer}
-  #tehe-export-panel button:hover{background:#3a4048;border-color:#7e8794}
-  #tehe-export-panel button:disabled{opacity:.55;cursor:wait}
-  #tehe-export-status{min-height:16px;margin-top:7px;text-align:center;font-size:12px;color:#c7cbd1}
-  @media(max-width:520px){#tehe-export-panel{right:8px;bottom:8px;width:calc(100vw - 16px)}#tehe-export-panel button{font-size:12px}}
+  #tehe-export-controls{display:inline-flex;flex-wrap:wrap;gap:4px;align-items:center;max-width:100%;margin-left:8px;box-sizing:border-box;vertical-align:middle;font:11px Arial,sans-serif}
+  #tehe-export-controls button{display:inline-block;width:auto;min-height:24px;margin:0;padding:3px 7px;box-sizing:border-box;border:1px solid #666b73;border-radius:4px;background:#30343a;color:#f7f7f7;font:700 10px/1.25 Arial,sans-serif;white-space:nowrap;cursor:pointer}
+  #tehe-export-controls button:hover{background:#3a4048;border-color:#9299a3}
+  #tehe-export-controls button:disabled{opacity:.55;cursor:wait}
+  #tehe-export-status{display:inline-block;max-width:100%;margin-left:3px;color:#9da3ad;font:10px/1.25 Arial,sans-serif;white-space:normal}
 </style>
-<div class="tehe-title">Elimination Update Exports</div>
-<button type="button" data-export="newsletter">${escapeHtml(BUTTON_LABELS.newsletter)}</button>
-<button type="button" data-export="discord">${escapeHtml(BUTTON_LABELS.discord)}</button>
-<button type="button" data-export="leaderboard">${escapeHtml(BUTTON_LABELS.leaderboard)}</button>
-<div id="tehe-export-status" role="status">Ready.</div>`;
+<button type="button" data-export="newsletter" title="${escapeHtml(BUTTON_LABELS.newsletter)}" aria-label="${escapeHtml(BUTTON_LABELS.newsletter)}">HTML Export</button>
+<button type="button" data-export="discord" title="${escapeHtml(BUTTON_LABELS.discord)}" aria-label="${escapeHtml(BUTTON_LABELS.discord)}">Discord Export</button>
+<button type="button" data-export="leaderboard" title="${escapeHtml(BUTTON_LABELS.leaderboard)}" aria-label="${escapeHtml(BUTTON_LABELS.leaderboard)}">Full Faction Export</button>
+<span id="tehe-export-status" role="status">Ready.</span>`;
     const buttons = [...panel.querySelectorAll('button[data-export]')];
     buttons.forEach((button) => button.addEventListener('click', () => runExport(button.dataset.export, buttons)));
-    global.document.body.appendChild(panel);
+    header.appendChild(panel);
   }
 
   function init() {
