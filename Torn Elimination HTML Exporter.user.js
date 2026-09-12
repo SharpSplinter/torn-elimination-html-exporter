@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Elimination HTML Exporter
 // @namespace    https://github.com/SharpSplinter/torn-elimination-html-exporter
-// @version      1.2.1
+// @version      1.3.0
 // @description  Export styled Torn HTML newsletters, Discord updates, and full faction Elimination leaderboards.
 // @author       SharpSplinter
 // @homepageURL  https://github.com/SharpSplinter/torn-elimination-html-exporter
@@ -20,7 +20,7 @@
 (function eliminationHtmlExporter(global) {
   'use strict';
 
-  const VERSION = '1.2.1';
+  const VERSION = '1.3.0';
   const API_BASE = 'https://api.torn.com/v2';
   const PDA_API_KEY = '###PDA-APIKEY###';
   const BUTTON_LABELS = Object.freeze({
@@ -33,9 +33,9 @@
     factionIds: 'tehe.factionIds',
     history: 'tehe.rankHistory.v1',
   });
-  const REQUEST_DELAY_MS = 1200;
-  const CHUNK_SIZE = 10;
-  const CHUNK_PAUSE_MS = 10000;
+  const REQUESTS_PER_MINUTE = 90;
+  const REQUEST_START_INTERVAL_MS = Math.ceil(60000 / REQUESTS_PER_MINUTE);
+  const MAX_CONCURRENT_REQUESTS = 6;
 
   const TEAM_STYLES = Object.freeze({
     'rocket scientists': { name: 'Rocket Scientists', badge: 'RS', icon: '🚀', marker: '🟠', color: '#ff9f43' },
@@ -632,16 +632,58 @@ ${body}
     return new Promise((resolve) => global.setTimeout(resolve, milliseconds));
   }
 
-  async function pacedMap(items, worker, onProgress = () => {}) {
-    const results = [];
-    for (let index = 0; index < items.length; index += 1) {
-      results.push(await worker(items[index], index));
-      onProgress(index + 1, items.length);
-      const completed = index + 1;
-      if (completed >= items.length) continue;
-      await sleep(completed % CHUNK_SIZE === 0 ? CHUNK_PAUSE_MS : REQUEST_DELAY_MS);
+  function createRequestScheduler(options = {}) {
+    const requestsPerMinute = Math.max(1, toNumber(options.requestsPerMinute, REQUESTS_PER_MINUTE));
+    const intervalMs = Math.max(1, toNumber(options.intervalMs, Math.ceil(60000 / requestsPerMinute)));
+    const maxConcurrent = Math.max(1, Math.floor(toNumber(options.maxConcurrent, MAX_CONCURRENT_REQUESTS)));
+    const queue = [];
+    let active = 0;
+    let nextStartAt = 0;
+    let timer = null;
+
+    function pump() {
+      if (!queue.length || active >= maxConcurrent) return;
+      const now = Date.now();
+      const delay = Math.max(0, nextStartAt - now);
+      if (delay > 0) {
+        if (timer == null) {
+          timer = global.setTimeout(() => {
+            timer = null;
+            pump();
+          }, delay);
+        }
+        return;
+      }
+
+      const task = queue.shift();
+      nextStartAt = Math.max(now, nextStartAt) + intervalMs;
+      active += 1;
+      Promise.resolve()
+        .then(task.worker)
+        .then(task.resolve, task.reject)
+        .finally(() => {
+          active -= 1;
+          pump();
+        });
+      pump();
     }
-    return results;
+
+    return function schedule(worker) {
+      return new Promise((resolve, reject) => {
+        queue.push({ worker, resolve, reject });
+        pump();
+      });
+    };
+  }
+
+  async function pacedMap(items, worker, onProgress = () => {}, schedule = createRequestScheduler()) {
+    let completed = 0;
+    return Promise.all(items.map((item, index) => schedule(async () => {
+      const result = await worker(item, index);
+      completed += 1;
+      onProgress(completed, items.length);
+      return result;
+    })));
   }
 
   async function currentFactionId(apiKey) {
@@ -651,13 +693,26 @@ ${body}
   }
 
   async function collectSnapshot(apiKey, factionIds, onProgress = () => {}) {
-    onProgress('Loading faction rosters and team standings…');
+    const schedule = createRequestScheduler();
+    const scheduledApiGet = async (path, retry = 0) => {
+      try {
+        return await schedule(() => apiGet(path, apiKey));
+      } catch (error) {
+        const rateLimited = /HTTP 429|Torn API error 5\b|too many requests/i.test(String(error?.message || error));
+        if (!rateLimited || retry >= 2) throw error;
+        onProgress(`Torn rate limit reached; retrying safely in ${(retry + 1) * 5} seconds…`);
+        await sleep((retry + 1) * 5000);
+        return scheduledApiGet(path, retry + 1);
+      }
+    };
+
+    onProgress(`Loading faction rosters and team standings at up to ${REQUESTS_PER_MINUTE} calls/minute…`);
     const [standingsPayload, factionPayloads] = await Promise.all([
-      apiGet('/torn/elimination', apiKey).catch(() => ({ elimination: [] })),
+      scheduledApiGet('/torn/elimination').catch(() => ({ elimination: [] })),
       Promise.all(factionIds.map(async (id) => {
         const [basic, members] = await Promise.all([
-          apiGet(`/faction/${id}/basic?striptags=true`, apiKey),
-          apiGet(`/faction/${id}/members?striptags=true`, apiKey),
+          scheduledApiGet(`/faction/${id}/basic?striptags=true`),
+          scheduledApiGet(`/faction/${id}/members?striptags=true`),
         ]);
         const faction = normalizeFactionBasic(basic, id);
         return { faction, members: normalizeMembers(members, faction) };
@@ -668,10 +723,14 @@ ${body}
     const members = factionPayloads.flatMap((entry) => entry.members);
     const previousHistory = readHistory(await storageGet(STORAGE.history, {}));
 
-    const records = await pacedMap(members, async (member) => {
-      const payload = await apiGet(`/user/${member.id}/competition`, apiKey);
-      return classifyMember(member, normalizeCompetition(payload), previousHistory[member.id], standings);
-    }, (done, total) => onProgress(`Loading Elimination records… ${done}/${total}`));
+    let completed = 0;
+    const records = await Promise.all(members.map(async (member) => {
+      const payload = await scheduledApiGet(`/user/${member.id}/competition`);
+      const record = classifyMember(member, normalizeCompetition(payload), previousHistory[member.id], standings);
+      completed += 1;
+      onProgress(`Loading Elimination records… ${completed}/${members.length} (target ${REQUESTS_PER_MINUTE} calls/minute)`);
+      return record;
+    }));
 
     const players = assignRanks(records.filter((player) => player.status !== 'inactive'), previousHistory);
     await storageSet(STORAGE.history, serializeHistory(players));
@@ -843,6 +902,9 @@ ${body}
 
   const core = Object.freeze({
     VERSION,
+    REQUESTS_PER_MINUTE,
+    REQUEST_START_INTERVAL_MS,
+    MAX_CONCURRENT_REQUESTS,
     BUTTON_LABELS,
     TEAM_STYLES,
     escapeHtml,
@@ -865,6 +927,7 @@ ${body}
     serializeHistory,
     roastPlayer,
     packDiscordBlocks,
+    createRequestScheduler,
     pacedMap,
   });
 
