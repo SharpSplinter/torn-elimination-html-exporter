@@ -58,12 +58,36 @@ const fixture = {
 };
 
 test('standalone userscript exposes three uniquely labelled export actions', () => {
+  assert.equal(exporter.VERSION, '1.3.0');
   assert.deepEqual(Object.keys(exporter.BUTTON_LABELS), ['newsletter', 'discord', 'leaderboard']);
   assert.match(exporter.BUTTON_LABELS.newsletter, /Elimination Alliance Update/);
   assert.match(exporter.BUTTON_LABELS.discord, /Discord Markdown/);
   assert.match(exporter.BUTTON_LABELS.leaderboard, /Full Faction Leaderboard/);
   assert.notEqual(exporter.BUTTON_LABELS.newsletter, exporter.BUTTON_LABELS.leaderboard);
   assert.notEqual(exporter.BUTTON_LABELS.newsletter, exporter.BUTTON_LABELS.discord);
+});
+
+test('request scheduler targets 90 calls per minute with bounded concurrency', async () => {
+  assert.equal(exporter.REQUESTS_PER_MINUTE, 90);
+  assert.equal(exporter.REQUEST_START_INTERVAL_MS, 667);
+  assert.equal(exporter.MAX_CONCURRENT_REQUESTS, 6);
+
+  const schedule = exporter.createRequestScheduler({ intervalMs: 3, maxConcurrent: 3 });
+  const starts = [];
+  let active = 0;
+  let peakActive = 0;
+  const results = await Promise.all(Array.from({ length: 10 }, (_, index) => schedule(async () => {
+    starts.push(Date.now());
+    active += 1;
+    peakActive = Math.max(peakActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    active -= 1;
+    return index;
+  })));
+
+  assert.deepEqual(results, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.ok(peakActive <= 3);
+  assert.ok(starts.at(-1) - starts[0] >= 20);
 });
 
 test('userscript runs only on the Torn Elimination page', () => {
