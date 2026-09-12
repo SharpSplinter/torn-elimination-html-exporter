@@ -58,7 +58,7 @@ const fixture = {
 };
 
 test('standalone userscript exposes three uniquely labelled export actions', () => {
-  assert.equal(exporter.VERSION, '1.5.0');
+  assert.equal(exporter.VERSION, '1.6.0');
   assert.deepEqual(Object.keys(exporter.BUTTON_LABELS), ['newsletter', 'discord', 'leaderboard']);
   assert.match(exporter.BUTTON_LABELS.newsletter, /Elimination Alliance Update/);
   assert.match(exporter.BUTTON_LABELS.discord, /Discord Markdown/);
@@ -198,6 +198,10 @@ test('newsletter preserves centered bold headers, ranks, team styling and roasts
   }
   assert.doesNotMatch(html, /Former <span[^>]*>Loose Cannons #/);
   assert.match(html, /Brought the intimidating name/);
+  assert.ok(html.indexOf('PODIUM') < html.indexOf('ALLIANCE TOP 10'));
+  assert.ok(html.indexOf('ALLIANCE TOP 10') < html.indexOf('ALLIANCE TOP 15'));
+  assert.ok(html.indexOf('ALLIANCE TOP 15') < html.indexOf('DROPPED OUT &mdash; WALL OF SHAME'));
+  assert.ok(html.indexOf('DROPPED OUT &mdash; WALL OF SHAME') < html.indexOf('[\$3xy] NAUGHTY SOULS'));
   assert.match(html, /\(\+6\)/);
   assert.match(html, /\(-1\)/);
   assert.doesNotMatch(html, /href="\[https?:\/\//);
@@ -208,18 +212,23 @@ test('newsletter preserves centered bold headers, ranks, team styling and roasts
 
 test('Discord export mirrors the approved native Markdown layout in mobile-safe messages', () => {
   const messages = exporter.buildDiscordMessages(fixture);
-  assert.ok(messages.length >= 3);
+  assert.equal(messages.length, 3);
   assert.ok(messages.every((message) => message.length <= 1950));
   const markdown = messages.join('\n\n');
   assert.match(markdown, /^# 🏆 ELIMINATION ALLIANCE UPDATE/m);
   assert.match(markdown, /^-# 🥇🥈🥉 Podium/m);
-  assert.ok(markdown.includes('## 💜 \\[$3XY\\] NAUGHTY SOULS'));
   assert.match(markdown, /^### 🥇🥈🥉 PODIUM/m);
-  assert.match(markdown, /> 🥇 🔴 \*\*\[SuperSheepie\]\(<https:\/\/www\.torn\.com\/profiles\.php\?XID=4009267>\)\*\*/);
+  assert.match(markdown, /> 🥇 💜 🔴 \*\*\[SuperSheepie\]\(<https:\/\/www\.torn\.com\/profiles\.php\?XID=4009267>\)\*\*/);
   assert.match(markdown, /> -# 🚀 Rocket Scientists #1 • 188 attacks/);
   assert.match(markdown, /Emma\\_Watson\\_/);
   assert.match(markdown, /^# 🔴 DROPPED OUT/m);
-  assert.match(markdown, /Brought the intimidating name, left the attacks at zero/);
+  assert.match(markdown, /Intimidating name, zero attacks, absolutely nothing reaped/);
+  assert.doesNotMatch(messages[0], /DROPPED OUT\n-# WALL OF SHAME/);
+  assert.doesNotMatch(messages[1], /DROPPED OUT\n-# WALL OF SHAME/);
+  assert.match(messages[2], /DROPPED OUT\n-# WALL OF SHAME/);
+  assert.match(messages[2], /## 💜 \\\[\$3XY\\\] NAUGHTY SOULS/);
+  assert.doesNotMatch(messages[0], /## 💜/);
+  assert.doesNotMatch(messages[1], /## 💜/);
   assert.doesNotMatch(markdown, /```ansi|\u001b\[/i);
 });
 
@@ -247,25 +256,135 @@ test('rank assignment is deterministic and calculates faction, team and movement
   assert.equal(ranked[2].teamRank, 2);
 });
 
-test('classification uses current teams and remembered former teams without exposing keys', () => {
-  const standings = exporter.normalizeTeamStandings({ elimination: { teams: [{ id: 5, name: 'APEX', score: 999, position: 1 }] } });
+test('classification admits only confirmed participants, preserves scores, and makes dropout terminal', () => {
+  const standings = exporter.normalizeTeamStandings({ elimination: { teams: [{ id: 5, name: 'APEX', score: 999, position: 1, eliminated: false }, { id: 6, name: 'Loose Cannons', eliminated: true }] } });
   const active = exporter.classifyMember(
     { id: 8, name: 'Active', factionId: 100 },
-    { name: 'Elimination', score: 20, attacks: 3, teamName: 'APEX', teamId: 5 },
+    { valid: true, name: 'Elimination', score: 20, attacks: 3, teamName: 'APEX', teamId: 5 },
+    { enrolled: true, status: 'active', attacks: 10, score: 25, teamName: 'APEX' },
+    standings,
+  );
+  const nonparticipant = exporter.classifyMember(
+    { id: 9, name: 'Never Enrolled', factionId: 100 },
+    { valid: true, name: 'Elimination', score: 0, attacks: 0, teamName: '', teamId: null },
     null,
     standings,
   );
-  const dropped = exporter.classifyMember(
-    { id: 9, name: 'Dropped', factionId: 100 },
-    { name: 'Elimination', score: 0, attacks: 0, teamName: 'Loose Cannons', teamId: null },
-    null,
+  const defeated = exporter.classifyMember(
+    { id: 10, name: 'Defeated', factionId: 100 },
+    { valid: true, name: 'Elimination', score: 10, attacks: 4, teamName: 'Loose Cannons', teamId: 6 },
+    { enrolled: true, status: 'active', attacks: 7, teamName: 'Loose Cannons' },
+    standings,
+  );
+  const terminal = exporter.classifyMember(
+    { id: 11, name: 'Terminal', factionId: 100 },
+    { valid: true, name: 'Elimination', score: 99, attacks: 99, teamName: 'APEX', teamId: 5 },
+    { enrolled: true, status: 'dropped', attacks: 12, teamName: 'APEX' },
     standings,
   );
   assert.equal(active.status, 'active');
   assert.equal(active.teamScore, 999);
-  assert.equal(dropped.status, 'dropped');
-  assert.equal(dropped.teamName, 'Loose Cannons');
+  assert.equal(active.attacks, 10);
+  assert.equal(active.score, 25);
+  assert.equal(nonparticipant.status, 'inactive');
+  assert.equal(nonparticipant.enrolled, false);
+  assert.equal(defeated.status, 'dropped');
+  assert.equal(defeated.attacks, 7);
+  assert.equal(terminal.status, 'dropped');
+  assert.equal(terminal.attacks, 12);
+  assert.equal(standings.byId.get(6).eliminated, true);
   assert.equal(exporter.normalizeCompetition({ competition: { name: 'Elimination', score: 0, attacks: 0, team: 'Loose Cannons', team_id: null } }).teamId, null);
+});
+
+test('supplied roster seed contains only enrolled participants and skips terminal dropouts', () => {
+  assert.equal(exporter.PARTICIPANT_SEED.length, 63);
+  assert.equal(exporter.PARTICIPANT_SEED.filter((entry) => entry.status === 'active').length, 55);
+  assert.equal(exporter.PARTICIPANT_SEED.filter((entry) => entry.status === 'dropped').length, 8);
+  const ledger = exporter.readParticipantLedger({});
+  const plan = exporter.participantLookupPlan([
+    { id: 9999999, name: 'Not Enrolled', factionId: 8317, factionName: 'Naughty Souls', factionTag: '$3xy' },
+  ], ledger, [8317, 44817]);
+  assert.equal(plan.lookups.length, 55);
+  assert.equal(plan.frozen.length, 8);
+  assert.ok(plan.frozen.every((entry) => entry.status === 'dropped'));
+  assert.ok(!plan.lookups.some((entry) => entry.id === 9999999));
+});
+
+test('unseeded factions receive one roster discovery plan', () => {
+  const members = [
+    { id: 7001, name: 'One', factionId: 999 },
+    { id: 7002, name: 'Two', factionId: 999 },
+  ];
+  const plan = exporter.participantLookupPlan(members, exporter.readParticipantLedger({}), [999]);
+  assert.deepEqual(plan.lookups.map((entry) => entry.id), [7001, 7002]);
+  assert.equal(plan.frozen.length, 0);
+});
+
+test('participant ledger is durable, non-regressing, and never reactivates a dropout', () => {
+  const ledger = exporter.readParticipantLedger({
+    3583932: { id: 3583932, enrolled: true, status: 'active', attacks: 1, teamName: 'APEX' },
+  });
+  assert.equal(ledger[3583932].status, 'dropped');
+  assert.equal(ledger[3583932].attacks, 19);
+  const saved = exporter.serializeParticipantLedger([
+    { ...ledger[3583932], status: 'active', attacks: 100, allianceRank: 20, factionRank: 15 },
+  ], ledger);
+  assert.equal(saved[3583932].status, 'dropped');
+  assert.equal(saved[3583932].attacks, 19);
+  assert.equal(saved[3583932].allianceRank, 20);
+  assert.match(exporter.STORAGE.participants, /participantLedger/);
+  assert.match(exporter.STORAGE.exports, /generatedExports/);
+});
+
+test('zero-attack dropout rank anchors advance only when active participants begin scoring', () => {
+  const seed = exporter.PARTICIPANT_SEED.map((entry) => ({ ...entry, score: 0 }));
+  const previous = Object.fromEntries(seed.map((entry) => [entry.id, entry]));
+  const first = exporter.assignRanks(seed, previous);
+  const atomic = first.find((entry) => entry.id === 3676010);
+  assert.equal(atomic.allianceRank, 65);
+  assert.equal(atomic.factionRank, 23);
+  const saved = exporter.serializeParticipantLedger(first, previous);
+  const changed = first.map((entry) => entry.id === 4046561 ? { ...entry, attacks: 1 } : { ...entry });
+  const second = exporter.assignRanks(changed, saved);
+  const updatedAtomic = second.find((entry) => entry.id === 3676010);
+  assert.equal(updatedAtomic.allianceRank, 66);
+  assert.equal(updatedAtomic.factionRank, 24);
+});
+
+test('team ranks exclude dropped participants', () => {
+  const ranked = exporter.assignRanks([
+    player({ id: 1, name: 'Active One', teamName: 'APEX', attacks: 10 }),
+    player({ id: 2, name: 'Dropped', teamName: 'APEX', attacks: 9, status: 'dropped' }),
+    player({ id: 3, name: 'Active Two', teamName: 'APEX', attacks: 8 }),
+  ]);
+  assert.equal(ranked.find((entry) => entry.id === 1).teamRank, 1);
+  assert.equal(ranked.find((entry) => entry.id === 2).teamRank, null);
+  assert.equal(ranked.find((entry) => entry.id === 3).teamRank, 2);
+});
+
+test('full supplied baseline renders exactly three messages and all confirmed dropouts', () => {
+  const factions = [
+    { id: 8317, name: 'Naughty Souls', tag: '$3xy' },
+    { id: 44817, name: 'Naughty Sanctuary', tag: 'NaSa' },
+  ];
+  const previous = Object.fromEntries(exporter.PARTICIPANT_SEED.map((entry) => [entry.id, entry]));
+  const players = exporter.assignRanks(exporter.PARTICIPANT_SEED.map((entry) => ({ ...entry, score: 0 })), previous);
+  const messages = exporter.buildDiscordMessages({ factions, players });
+  assert.equal(messages.length, 3);
+  assert.ok(messages.every((message) => message.length <= 1950));
+  assert.match(messages[0], /SuperSheepie/);
+  assert.match(messages[1], /SharpSplinter/);
+  for (const name of ['a1ry', 'Atomic-Toast', 'Dscott138', 'Five', 'GORYDAMNREAPER', 'jinglely', 'KidLaRona', 'smk47']) {
+    assert.match(messages[2], new RegExp(name));
+    assert.doesNotMatch(`${messages[0]}${messages[1]}`, new RegExp(name));
+  }
+});
+
+test('live standings are mandatory and the exact endpoint is used without a silent fallback', () => {
+  assert.match(source, /scheduledApiGet\('\/torn\/elimination'\)/);
+  assert.doesNotMatch(source, /scheduledApiGet\('\/torn\/elimination'\)\.catch/);
+  assert.match(source, /response contained no team standings/);
+  assert.match(source, /incorrectly marking the alliance as dropped out/);
 });
 
 test('HTML escaping and faction parsing reject markup and invalid IDs', () => {
