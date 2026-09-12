@@ -64,6 +64,12 @@ test('standalone userscript exposes exactly two uniquely labelled export actions
   assert.notEqual(exporter.BUTTON_LABELS.newsletter, exporter.BUTTON_LABELS.leaderboard);
 });
 
+test('userscript runs only on the Torn Elimination page', () => {
+  const matches = source.match(/^\/\/ @match\s+(.+)$/gm) || [];
+  assert.deepEqual(matches, ['// @match        https://www.torn.com/page.php?sid=competition*']);
+  assert.doesNotMatch(source, /^\/\/ @match\s+https:\/\/www\.torn\.com\/\*$/m);
+});
+
 test('clipboard-only requirement has no download implementation', () => {
   assert.doesNotMatch(source, /downloadHtml|createObjectURL|\.download\s*=/);
   assert.match(source, /GM_setClipboard/);
