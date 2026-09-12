@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Elimination HTML Exporter
 // @namespace    https://github.com/SharpSplinter/torn-elimination-html-exporter
-// @version      1.6.0
+// @version      1.7.0
 // @description  Export styled Torn HTML newsletters, Discord updates, and full faction Elimination leaderboards.
 // @author       SharpSplinter
 // @homepageURL  https://github.com/SharpSplinter/torn-elimination-html-exporter
@@ -20,7 +20,7 @@
 (function eliminationHtmlExporter(global) {
   'use strict';
 
-  const VERSION = '1.6.0';
+  const VERSION = '1.7.0';
   const API_BASE = 'https://api.torn.com/v2';
   const PDA_API_KEY = '###PDA-APIKEY###';
   const BUTTON_LABELS = Object.freeze({
@@ -31,10 +31,21 @@
   const STORAGE = Object.freeze({
     apiKey: 'tehe.apiKey',
     factionIds: 'tehe.factionIds',
-    history: 'tehe.rankHistory.v3',
-    snapshot: 'tehe.snapshotCache.v3',
-    participants: 'tehe.participantLedger.v1',
+    history: 'tehe.rankHistory.v4',
+    snapshot: 'tehe.snapshotCache.v4',
+    participants: 'tehe.participantLedger.v2',
     exports: 'tehe.generatedExports.v1',
+  });
+  const SHARED_EXPORT = Object.freeze({
+    snapshot: 'tefr.sharedEliminationSnapshot.v1',
+    progress: 'tefr.sharedEliminationProgress.v1',
+    bridge: 'tefr.sharedEliminationBridge.v1',
+    requestEvent: 'tefr:request-refresh',
+    updatedEvent: 'tefr:snapshot-updated',
+    schemaVersion: 1,
+    bridgeTtlMs: 2 * 60 * 1000,
+    refreshWaitMs: 5 * 60 * 1000,
+    pollMs: 350,
   });
   const SNAPSHOT_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
   const REQUESTS_PER_MINUTE = 90;
@@ -848,6 +859,186 @@ ${body}
     try { return JSON.parse(raw); } catch { return {}; }
   }
 
+  function sharedStorage() {
+    try { return global?.localStorage || null; } catch { return null; }
+  }
+
+  function readSharedRecord(key, storage = sharedStorage()) {
+    if (!storage) return null;
+    try {
+      const raw = storage.getItem(key);
+      return raw == null ? null : (typeof raw === 'string' ? JSON.parse(raw) : raw);
+    } catch { return null; }
+  }
+
+  function normalizeSharedExportSnapshot(raw) {
+    const source = typeof raw === 'string' ? readHistory(raw) : raw;
+    if (!source || toNumber(source.schemaVersion, null) !== SHARED_EXPORT.schemaVersion
+      || !Array.isArray(source.factions) || !Array.isArray(source.members)) return null;
+    const factions = source.factions.map((faction) => ({
+      id: toNumber(faction?.id, null),
+      name: String(faction?.name || 'Unknown faction'),
+      tag: String(faction?.tag || ''),
+      own: Boolean(faction?.own),
+    })).filter((faction) => faction.id != null);
+    const factionById = new Map(factions.map((faction) => [faction.id, faction]));
+    const teamById = new Map((source.teams || []).map((team) => [toNumber(team?.id, null), team]));
+    const players = source.members.map((member) => {
+      const id = toNumber(member?.id, null);
+      const factionId = toNumber(member?.factionId, null);
+      const faction = factionById.get(factionId);
+      const dropped = Boolean(member?.droppedOut) || member?.status === 'dropped';
+      const active = !dropped && (Boolean(member?.participating) || member?.status === 'active');
+      const teamId = dropped
+        ? toNumber(member?.formerTeamId ?? member?.teamId, null)
+        : toNumber(member?.teamId, null);
+      const teamName = dropped
+        ? String(member?.formerTeamName || member?.teamName || 'Former team')
+        : String(member?.teamName || '');
+      const standing = teamById.get(teamId);
+      const allianceRank = toNumber(member?.allianceRank, null);
+      const factionRank = toNumber(member?.factionRank, null);
+      const previousAllianceRank = toNumber(member?.previousAllianceRank, null);
+      return {
+        id,
+        name: String(member?.name || `Player ${id || ''}`).trim(),
+        factionId,
+        factionName: String(member?.factionName || faction?.name || 'Unknown faction'),
+        factionTag: String(member?.factionTag || faction?.tag || ''),
+        enrolled: active || dropped,
+        status: dropped ? 'dropped' : active ? 'active' : 'inactive',
+        participating: active,
+        droppedOut: dropped,
+        teamId,
+        teamName,
+        formerTeamId: dropped ? teamId : null,
+        formerTeamName: dropped ? teamName : '',
+        teamScore: toNumber(standing?.score, toNumber(member?.score)),
+        teamPosition: toNumber(standing?.position, null),
+        score: toNumber(member?.score),
+        attacks: toNumber(member?.attacks),
+        allianceRank,
+        factionRank,
+        teamRank: dropped ? null : toNumber(member?.teamRank, null),
+        previousAllianceRank,
+        previousFactionRank: toNumber(member?.previousFactionRank, null),
+        movement: toNumber(member?.movement,
+          previousAllianceRank != null && allianceRank != null ? previousAllianceRank - allianceRank : 0),
+        droppedOutAt: dropped ? toNumber(member?.droppedOutAt) : 0,
+        availability: String(member?.availability || 'shared'),
+      };
+    }).filter((player) => player.id && player.enrolled && player.status !== 'inactive')
+      .sort((left, right) => toNumber(left.allianceRank, Number.MAX_SAFE_INTEGER)
+        - toNumber(right.allianceRank, Number.MAX_SAFE_INTEGER)
+        || participantComparator(left, right));
+    if (!players.length) return null;
+    return {
+      factions,
+      players,
+      generatedAt: String(source.generatedAt || new Date(toNumber(source.updatedAt) || Date.now()).toISOString()),
+      updatedAt: toNumber(source.updatedAt, null),
+      eventKey: String(source.eventKey || ''),
+      scope: String(source.scope || ''),
+      source: String(source.source || 'Torn Elimination Faction Rankings'),
+      sourceVersion: String(source.sourceVersion || ''),
+    };
+  }
+
+  function isSharedSnapshotFresh(raw, now = Date.now(), maxAgeMs = SNAPSHOT_CACHE_MAX_AGE_MS) {
+    const snapshot = normalizeSharedExportSnapshot(raw);
+    if (!snapshot || snapshot.updatedAt == null) return false;
+    const age = now - snapshot.updatedAt;
+    return age >= 0 && age < maxAgeMs;
+  }
+
+  function sharedBridgeAvailable(raw, now = Date.now(), ttlMs = SHARED_EXPORT.bridgeTtlMs) {
+    const updatedAt = toNumber(raw?.updatedAt, null);
+    return Boolean(raw?.available)
+      && toNumber(raw?.schemaVersion, null) === SHARED_EXPORT.schemaVersion
+      && updatedAt != null && now - updatedAt >= 0 && now - updatedAt < ttlMs;
+  }
+
+  async function requestSharedExportSnapshot(onProgress = () => {}, options = {}) {
+    const storage = options.storage || sharedStorage();
+    const now = options.now || (() => Date.now());
+    const delay = options.delay || sleep;
+    const maxAgeMs = toNumber(options.maxAgeMs, SNAPSHOT_CACHE_MAX_AGE_MS);
+    const waitMs = toNumber(options.waitMs, SHARED_EXPORT.refreshWaitMs);
+    const pollMs = toNumber(options.pollMs, SHARED_EXPORT.pollMs);
+    let raw = readSharedRecord(SHARED_EXPORT.snapshot, storage);
+    if (isSharedSnapshotFresh(raw, now(), maxAgeMs)) {
+      const snapshot = normalizeSharedExportSnapshot(raw);
+      const membersTotal = snapshot.players.length;
+      const chunksTotal = Math.ceil(membersTotal / MEMBER_PROGRESS_CHUNK_SIZE);
+      onProgress({
+        phase: 'shared cache',
+        message: `Using authoritative rankings saved by Torn Elimination Faction Rankings v${snapshot.sourceVersion || '?'}.`,
+        percent: 95,
+        cacheHit: true,
+        apiStarted: 0,
+        apiCompleted: 0,
+        apiTotal: 0,
+        membersCompleted: membersTotal,
+        membersTotal,
+        chunksCompleted: chunksTotal,
+        chunksTotal,
+        chunkSize: MEMBER_PROGRESS_CHUNK_SIZE,
+      });
+      return snapshot;
+    }
+
+    const bridge = readSharedRecord(SHARED_EXPORT.bridge, storage);
+    if (!sharedBridgeAvailable(bridge, now())) return null;
+    onProgress({
+      phase: 'shared refresh',
+      message: 'Requesting fresh authoritative rankings from Torn Elimination Faction Rankings…',
+      percent: 1,
+    });
+    if (typeof options.requestRefresh === 'function') options.requestRefresh();
+    else {
+      try {
+        const EventConstructor = global.CustomEvent || global.Event;
+        global.document?.dispatchEvent(new EventConstructor(SHARED_EXPORT.requestEvent));
+      } catch { return null; }
+    }
+
+    const deadline = now() + waitMs;
+    while (now() < deadline) {
+      await delay(pollMs);
+      raw = readSharedRecord(SHARED_EXPORT.snapshot, storage);
+      if (isSharedSnapshotFresh(raw, now(), maxAgeMs)) return normalizeSharedExportSnapshot(raw);
+      const progress = readSharedRecord(SHARED_EXPORT.progress, storage);
+      if (progress?.state === 'error') {
+        onProgress({
+          phase: 'shared refresh',
+          message: `${progress.message || 'The shared rankings refresh failed.'} Falling back to the exporter lookup.`,
+          percent: 2,
+        });
+        return null;
+      }
+      if (progress?.state === 'loading') {
+        onProgress({
+          phase: 'shared refresh',
+          message: progress.message || 'Refreshing authoritative rankings…',
+          percent: toNumber(progress.percent, 1),
+          apiCompleted: toNumber(progress.apiCompleted, 0),
+          apiTotal: toNumber(progress.apiTotal, null),
+          membersCompleted: toNumber(progress.membersCompleted, 0),
+          membersTotal: toNumber(progress.membersTotal, null),
+          chunksCompleted: toNumber(progress.chunksCompleted, 0),
+          chunksTotal: toNumber(progress.chunksTotal, null),
+          chunkSize: MEMBER_PROGRESS_CHUNK_SIZE,
+        });
+      }
+    }
+    onProgress({
+      phase: 'shared refresh',
+      message: 'The shared rankings refresh timed out. Falling back to the exporter lookup.',
+      percent: 2,
+    });
+    return null;
+  }
+
   function seedParticipantLedger() {
     return Object.fromEntries(PARTICIPANT_SEED.map((participant) => [participant.id, { ...participant }]));
   }
@@ -855,7 +1046,8 @@ ${body}
   function readParticipantLedger(raw) {
     const parsed = readHistory(raw);
     const saved = parsed?.participants && typeof parsed.participants === 'object' ? parsed.participants : parsed;
-    const ledger = seedParticipantLedger();
+    const fromSharedRankings = parsed?.source === SHARED_EXPORT.snapshot;
+    const ledger = fromSharedRankings ? {} : seedParticipantLedger();
     for (const [key, value] of Object.entries(saved || {})) {
       if (!value || typeof value !== 'object') continue;
       const id = toNumber(value.id ?? key, null);
@@ -873,6 +1065,25 @@ ${body}
       };
     }
     return ledger;
+  }
+
+  async function persistSharedSnapshot(snapshot) {
+    const capturedAt = new Date().toISOString();
+    const participants = Object.fromEntries(snapshot.players.map((player) => [player.id, {
+      ...player,
+      enrolled: true,
+      status: player.status === 'dropped' ? 'dropped' : 'active',
+      capturedAt,
+    }]));
+    await Promise.all([
+      storageSet(STORAGE.participants, {
+        schemaVersion: 1,
+        source: SHARED_EXPORT.snapshot,
+        updatedAt: snapshot.updatedAt,
+        participants,
+      }),
+      storageSet(STORAGE.history, serializeHistory(snapshot.players)),
+    ]);
   }
 
   function serializeParticipantLedger(players, existingLedger = {}) {
@@ -1485,7 +1696,13 @@ ${body}
     loadCache: () => storageGet(STORAGE.snapshot, null),
     saveCache: (entry) => storageSet(STORAGE.snapshot, entry),
     fetchSnapshot: async (onProgress) => {
-      onProgress({ phase: 'preparing', message: 'Checking API access and saved export settings…', percent: 1 });
+      onProgress({ phase: 'preparing', message: 'Checking for authoritative saved rankings…', percent: 1 });
+      const sharedSnapshot = await requestSharedExportSnapshot(onProgress);
+      if (sharedSnapshot) {
+        await persistSharedSnapshot(sharedSnapshot);
+        return sharedSnapshot;
+      }
+      onProgress({ phase: 'preparing', message: 'Shared rankings are unavailable; checking exporter API access and settings…', percent: 2 });
       const apiKey = await resolveApiKey();
       const factionIds = await resolveFactionScope(apiKey, onProgress);
       return collectSnapshot(apiKey, factionIds, onProgress, { apiOffset: 1 });
@@ -1594,6 +1811,7 @@ ${body}
     BUTTON_LABELS,
     TEAM_STYLES,
     STORAGE,
+    SHARED_EXPORT,
     DEFAULT_ALLIANCE_FACTION_IDS,
     PARTICIPANT_SEED,
     escapeHtml,
@@ -1613,6 +1831,11 @@ ${body}
     buildLeaderboardHtml,
     parseFactionIds,
     readHistory,
+    readSharedRecord,
+    normalizeSharedExportSnapshot,
+    isSharedSnapshotFresh,
+    sharedBridgeAvailable,
+    requestSharedExportSnapshot,
     seedParticipantLedger,
     readParticipantLedger,
     serializeParticipantLedger,

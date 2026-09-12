@@ -58,13 +58,50 @@ const fixture = {
 };
 
 test('standalone userscript exposes three uniquely labelled export actions', () => {
-  assert.equal(exporter.VERSION, '1.6.0');
+  assert.equal(exporter.VERSION, '1.7.0');
+  assert.equal(exporter.STORAGE.snapshot, 'tehe.snapshotCache.v4');
+  assert.equal(exporter.STORAGE.participants, 'tehe.participantLedger.v2');
   assert.deepEqual(Object.keys(exporter.BUTTON_LABELS), ['newsletter', 'discord', 'leaderboard']);
   assert.match(exporter.BUTTON_LABELS.newsletter, /Elimination Alliance Update/);
   assert.match(exporter.BUTTON_LABELS.discord, /Discord Markdown/);
   assert.match(exporter.BUTTON_LABELS.leaderboard, /Full Faction Leaderboard/);
   assert.notEqual(exporter.BUTTON_LABELS.newsletter, exporter.BUTTON_LABELS.leaderboard);
   assert.notEqual(exporter.BUTTON_LABELS.newsletter, exporter.BUTTON_LABELS.discord);
+});
+
+test('authoritative rankings snapshot imports only active participants and confirmed dropouts', async () => {
+  const now = 50_000;
+  const shared = {
+    schemaVersion: 1,
+    source: 'Torn Elimination Faction Rankings',
+    sourceVersion: '1.6.0',
+    updatedAt: now,
+    factions: [{ id: 8317, name: 'Naughty Souls', tag: '$3xy' }],
+    teams: [{ id: 1, name: 'APEX', score: 10, lives: 4, position: 2 }],
+    members: [
+      { id: 1, name: 'Active', factionId: 8317, participating: true, teamId: 1,
+        teamName: 'APEX', attacks: 12, allianceRank: 1, factionRank: 1 },
+      { id: 2, name: 'Dropped', factionId: 8317, participating: false, droppedOut: true,
+        formerTeamId: 1, formerTeamName: 'APEX', attacks: 7, allianceRank: 2, factionRank: 2 },
+      { id: 3, name: 'Never Enrolled', factionId: 8317, participating: false,
+        teamName: 'Unknown', attacks: 0, allianceRank: 3, factionRank: 3 },
+    ],
+  };
+  const storage = {
+    getItem(key) { return key === exporter.SHARED_EXPORT.snapshot ? JSON.stringify(shared) : null; },
+  };
+  let refreshRequests = 0;
+  const snapshot = await exporter.requestSharedExportSnapshot(() => {}, {
+    storage,
+    now: () => now,
+    requestRefresh: () => { refreshRequests += 1; },
+  });
+  assert.deepEqual(snapshot.players.map((entry) => [entry.name, entry.status]), [
+    ['Active', 'active'],
+    ['Dropped', 'dropped'],
+  ]);
+  assert.equal(snapshot.players[1].formerTeamName, 'APEX');
+  assert.equal(refreshRequests, 0);
 });
 
 test('five-minute snapshot cache reuses completed data and deduplicates an in-progress lookup', async () => {
