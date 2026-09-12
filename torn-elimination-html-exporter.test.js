@@ -58,13 +58,50 @@ const fixture = {
 };
 
 test('standalone userscript exposes three uniquely labelled export actions', () => {
-  assert.equal(exporter.VERSION, '1.3.0');
+  assert.equal(exporter.VERSION, '1.4.0');
   assert.deepEqual(Object.keys(exporter.BUTTON_LABELS), ['newsletter', 'discord', 'leaderboard']);
   assert.match(exporter.BUTTON_LABELS.newsletter, /Elimination Alliance Update/);
   assert.match(exporter.BUTTON_LABELS.discord, /Discord Markdown/);
   assert.match(exporter.BUTTON_LABELS.leaderboard, /Full Faction Leaderboard/);
   assert.notEqual(exporter.BUTTON_LABELS.newsletter, exporter.BUTTON_LABELS.leaderboard);
   assert.notEqual(exporter.BUTTON_LABELS.newsletter, exporter.BUTTON_LABELS.discord);
+});
+
+test('five-minute snapshot cache reuses completed data and deduplicates an in-progress lookup', async () => {
+  assert.equal(exporter.SNAPSHOT_CACHE_MAX_AGE_MS, 300000);
+  let now = 1000;
+  let fetches = 0;
+  let saved = null;
+  let releaseFetch;
+  const provider = exporter.createSnapshotProvider({
+    now: () => now,
+    loadCache: async () => saved,
+    saveCache: async (entry) => { saved = entry; },
+    fetchSnapshot: async () => {
+      fetches += 1;
+      await new Promise((resolve) => { releaseFetch = resolve; });
+      return { factions: [{ id: 1 }], players: [{ id: 2 }], generatedAt: 'test' };
+    },
+  });
+
+  const first = provider();
+  const simultaneous = provider();
+  assert.equal(fetches, 0);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fetches, 1);
+  releaseFetch();
+  assert.strictEqual(await first, await simultaneous);
+
+  now += 299999;
+  assert.strictEqual(await provider(), saved.snapshot);
+  assert.equal(fetches, 1);
+
+  now += 1;
+  const expired = provider();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fetches, 2);
+  releaseFetch();
+  await expired;
 });
 
 test('request scheduler targets 90 calls per minute with bounded concurrency', async () => {
