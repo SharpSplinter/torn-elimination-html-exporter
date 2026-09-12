@@ -58,13 +58,13 @@ const fixture = {
 };
 
 test('standalone userscript exposes three uniquely labelled export actions', () => {
-  assert.equal(exporter.VERSION, '1.7.0');
+  assert.equal(exporter.VERSION, '1.8.0');
   assert.equal(exporter.STORAGE.snapshot, 'tehe.snapshotCache.v4');
   assert.equal(exporter.STORAGE.participants, 'tehe.participantLedger.v2');
   assert.deepEqual(Object.keys(exporter.BUTTON_LABELS), ['newsletter', 'discord', 'leaderboard']);
   assert.match(exporter.BUTTON_LABELS.newsletter, /Elimination Alliance Update/);
   assert.match(exporter.BUTTON_LABELS.discord, /Discord Markdown/);
-  assert.match(exporter.BUTTON_LABELS.leaderboard, /Full Faction Leaderboard/);
+  assert.match(exporter.BUTTON_LABELS.leaderboard, /Export JSON File.*Full Faction Elimination Rankings/);
   assert.notEqual(exporter.BUTTON_LABELS.newsletter, exporter.BUTTON_LABELS.leaderboard);
   assert.notEqual(exporter.BUTTON_LABELS.newsletter, exporter.BUTTON_LABELS.discord);
 });
@@ -181,7 +181,7 @@ test('export controls are compact inline buttons beside the Elimination heading'
   assert.doesNotMatch(source, /#tehe-export-panel\{position:fixed/);
 });
 
-test('each export opens detailed progress first and requires an explicit clipboard click', () => {
+test('each export opens detailed progress first and requires an explicit completion action', () => {
   assert.match(source, /id = 'tehe-progress-overlay'/);
   assert.match(source, /role="progressbar"/);
   assert.match(source, /data-progress-percent>0%/);
@@ -189,18 +189,22 @@ test('each export opens detailed progress first and requires an explicit clipboa
   assert.match(source, /Members: discovering/);
   assert.match(source, /Chunks: discovering/);
   assert.match(source, /MEMBER_PROGRESS_CHUNK_SIZE = 10/);
-  assert.match(source, />Copy to Clipboard<\/button>/);
+  assert.match(source, /kind === 'leaderboard' \? 'Download JSON File' : 'Copy to Clipboard'/);
   assert.match(source, /Export ready\. Nothing has been copied yet\./);
   assert.match(source, /picker\.addEventListener\('change', displaySelectedExport\)/);
-  assert.match(source, /copyButton\.addEventListener\('click', async \(\) =>/);
+  assert.match(source, /actionButton\.addEventListener\('click', async \(\) =>/);
   assert.doesNotMatch(source, /Message 1 was copied automatically/);
   assert.doesNotMatch(source, /await deliver(?:Html|Discord)\(/);
 });
 
-test('clipboard-only requirement has no download implementation', () => {
-  assert.doesNotMatch(source, /downloadHtml|createObjectURL|\.download\s*=/);
+test('HTML and Discord use clipboard while Full Faction uses a JSON file download', () => {
+  assert.match(source, /function downloadJsonFile\(/);
+  assert.match(source, /application\/json;charset=utf-8/);
+  assert.match(source, /createObjectURL/);
+  assert.match(source, /anchor\.download = filename/);
   assert.match(source, /GM_setClipboard/);
   assert.match(source, /navigator\?\.clipboard\?\.writeText/);
+  assert.doesNotMatch(source, /downloadHtml/);
 });
 
 test('team mapping returns the agreed symbol and player-name color', () => {
@@ -269,13 +273,23 @@ test('Discord export mirrors the approved native Markdown layout in mobile-safe 
   assert.doesNotMatch(markdown, /```ansi|\u001b\[/i);
 });
 
-test('full leaderboard includes all active and dropped participants by faction', () => {
-  const html = exporter.buildLeaderboardHtml(fixture);
-  assert.match(html, /FULL ELIMINATION LEADERBOARD/);
-  assert.match(html, /16 ELIMINATION PARTICIPANTS/);
-  assert.match(html, /4 ELIMINATION PARTICIPANTS/);
-  assert.match(html, /Atomic-Toast/);
-  assert.match(html, /GORYDAMNREAPER/);
+test('full faction JSON contains all active and dropped participants grouped by faction', () => {
+  const json = exporter.buildFactionJson({ ...fixture, eventKey: '2026:1,2', scope: '8317:44817' });
+  const payload = JSON.parse(json);
+  assert.equal(payload.schemaVersion, 1);
+  assert.equal(payload.exportType, 'torn-elimination-full-faction-rankings');
+  assert.equal(payload.exporterVersion, '1.8.0');
+  assert.equal(payload.summary.factionCount, 2);
+  assert.equal(payload.summary.participantCount, 20);
+  assert.equal(payload.summary.activeCount, 15);
+  assert.equal(payload.summary.droppedOutCount, 5);
+  assert.deepEqual(payload.factions.map((faction) => faction.participantCount), [16, 4]);
+  assert.equal(payload.factions[0].participants[0].name, 'SuperSheepie');
+  assert.equal(payload.factions[0].participants.at(-1).name, 'GORYDAMNREAPER');
+  assert.equal(payload.factions[1].participants.some((entry) => entry.name === 'Atomic-Toast'), true);
+  assert.equal(json.includes('<div'), false);
+  assert.match(exporter.factionJsonFilename(fixture, new Date('2026-09-12T12:34:56.000Z')),
+    /^torn-elimination-3xy-NaSa-2026-09-12T12-34-56-000Z\.json$/);
 });
 
 test('rank assignment is deterministic and calculates faction, team and movement ranks', () => {

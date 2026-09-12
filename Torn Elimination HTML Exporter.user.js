@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Elimination HTML Exporter
 // @namespace    https://github.com/SharpSplinter/torn-elimination-html-exporter
-// @version      1.7.0
-// @description  Export styled Torn HTML newsletters, Discord updates, and full faction Elimination leaderboards.
+// @version      1.8.0
+// @description  Export styled Torn HTML newsletters, Discord updates, and full faction Elimination JSON files.
 // @author       SharpSplinter
 // @homepageURL  https://github.com/SharpSplinter/torn-elimination-html-exporter
 // @supportURL   https://github.com/SharpSplinter/torn-elimination-html-exporter/issues
@@ -20,13 +20,13 @@
 (function eliminationHtmlExporter(global) {
   'use strict';
 
-  const VERSION = '1.7.0';
+  const VERSION = '1.8.0';
   const API_BASE = 'https://api.torn.com/v2';
   const PDA_API_KEY = '###PDA-APIKEY###';
   const BUTTON_LABELS = Object.freeze({
     newsletter: 'Export Torn HTML — Elimination Alliance Update (Top Performers, Team Styling & Dropout Roast)',
     discord: 'Export Discord Markdown — Elimination Alliance Update (Three Mobile-Safe Messages with Team Icons & Dropout Roast)',
-    leaderboard: 'Export Torn HTML — Full Faction Leaderboard (Current Faction; Alliance/Additional Factions Optional)',
+    leaderboard: 'Export JSON File — Full Faction Elimination Rankings (Current Faction; Alliance/Additional Factions Optional)',
   });
   const STORAGE = Object.freeze({
     apiKey: 'tehe.apiKey',
@@ -694,27 +694,104 @@ ${body}
     return newsletterShell(parts.join('\n'));
   }
 
-  function buildLeaderboardHtml(snapshot) {
-    const players = snapshot.players || [];
+  function buildFactionJson(snapshot) {
+    const players = (snapshot.players || []).filter((player) => player.status !== 'inactive');
     const factions = snapshot.factions || [];
-    const parts = [headerBlock('FULL ELIMINATION LEADERBOARD', newsletterLegendHtml(true))];
-
-    factions.forEach((faction, index) => {
-      const group = players
-        .filter((player) => player.factionId === faction.id && player.status !== 'inactive')
-        .sort((a, b) => a.factionRank - b.factionRank);
-      if (!group.length) return;
-      parts.push(factionHeaderHtml(faction, index));
-      parts.push(sectionHeaderHtml('ALL', `${group.length} ELIMINATION PARTICIPANTS`, '#ffffff'));
-      parts.push(...group.map(playerRowHtml));
-      const attacks = group.reduce((total, player) => total + player.attacks, 0);
-      const active = group.filter((player) => player.status === 'active').length;
-      const dropped = group.filter((player) => player.status === 'dropped').length;
-      parts.push(`<div style="width:100%;max-width:100%;box-sizing:border-box;margin:14px 0 0;text-align:center;font-weight:700;color:#c7cbd1;overflow-wrap:anywhere;word-break:break-word;">${active} active &nbsp;&bull;&nbsp; ${dropped} dropped &nbsp;&bull;&nbsp; ${attacks.toLocaleString()} total attacks</div>`);
+    const exportedAt = new Date().toISOString();
+    const cleanPlayer = (player) => ({
+      id: player.id,
+      name: player.name,
+      profileUrl: `https://www.torn.com/profiles.php?XID=${player.id}`,
+      status: player.status,
+      participating: player.status === 'active',
+      droppedOut: player.status === 'dropped',
+      factionId: player.factionId,
+      factionName: player.factionName,
+      factionTag: player.factionTag,
+      teamId: player.teamId ?? null,
+      teamName: player.teamName || '',
+      formerTeamId: player.status === 'dropped' ? player.formerTeamId ?? player.teamId ?? null : null,
+      formerTeamName: player.status === 'dropped' ? player.formerTeamName || player.teamName || '' : '',
+      attacks: toNumber(player.attacks),
+      score: toNumber(player.score),
+      allianceRank: toNumber(player.allianceRank, null),
+      factionRank: toNumber(player.factionRank, null),
+      teamRank: player.status === 'active' ? toNumber(player.teamRank, null) : null,
+      movement: toNumber(player.movement),
+      previousAllianceRank: toNumber(player.previousAllianceRank, null),
+      previousFactionRank: toNumber(player.previousFactionRank, null),
+      droppedOutAt: player.status === 'dropped' && player.droppedOutAt
+        ? new Date(toNumber(player.droppedOutAt)).toISOString() : null,
+      availability: String(player.availability || ''),
     });
+    const factionExports = factions.map((faction) => {
+      const participants = players
+        .filter((player) => player.factionId === faction.id)
+        .sort((left, right) => toNumber(left.factionRank, Number.MAX_SAFE_INTEGER)
+          - toNumber(right.factionRank, Number.MAX_SAFE_INTEGER)
+          || participantComparator(left, right));
+      return {
+        id: faction.id,
+        name: faction.name,
+        tag: faction.tag || '',
+        participantCount: participants.length,
+        activeCount: participants.filter((player) => player.status === 'active').length,
+        droppedOutCount: participants.filter((player) => player.status === 'dropped').length,
+        totalAttacks: participants.reduce((total, player) => total + toNumber(player.attacks), 0),
+        participants: participants.map(cleanPlayer),
+      };
+    }).filter((faction) => faction.participantCount > 0);
+    const result = {
+      schemaVersion: 1,
+      exportType: 'torn-elimination-full-faction-rankings',
+      exporterVersion: VERSION,
+      exportedAt,
+      sourceGeneratedAt: snapshot.generatedAt || null,
+      eventKey: snapshot.eventKey || null,
+      scope: snapshot.scope || null,
+      summary: {
+        factionCount: factionExports.length,
+        participantCount: players.length,
+        activeCount: players.filter((player) => player.status === 'active').length,
+        droppedOutCount: players.filter((player) => player.status === 'dropped').length,
+        totalAttacks: players.reduce((total, player) => total + toNumber(player.attacks), 0),
+      },
+      teams: (snapshot.teams || []).map((team) => ({
+        id: team.id ?? null,
+        name: team.name || '',
+        position: team.position ?? null,
+        lives: toNumber(team.lives),
+        score: toNumber(team.score),
+        eliminated: Boolean(team.eliminated),
+      })),
+      factions: factionExports,
+    };
+    return JSON.stringify(result, null, 2);
+  }
 
-    parts.push('<div style="width:100%;max-width:100%;box-sizing:border-box;margin-top:25px;text-align:center;font-weight:700;color:#9ca3ad;overflow-wrap:anywhere;word-break:break-word;">Generated from current Torn Elimination competition data.</div>');
-    return documentShell(parts.join('\n'));
+  function factionJsonFilename(snapshot, now = new Date()) {
+    const scope = (snapshot.factions || []).map((faction) => faction.tag || faction.id)
+      .filter(Boolean).join('-').replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'faction';
+    const date = now.toISOString().replace(/[:.]/g, '-');
+    return `torn-elimination-${scope}-${date}.json`;
+  }
+
+  function downloadJsonFile(content, filename) {
+    if (!global.document?.body || typeof global.Blob !== 'function'
+      || typeof global.URL?.createObjectURL !== 'function') return false;
+    try {
+      const blob = new global.Blob([content], { type: 'application/json;charset=utf-8' });
+      const url = global.URL.createObjectURL(blob);
+      const anchor = global.document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.style.display = 'none';
+      global.document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      global.setTimeout(() => global.URL.revokeObjectURL(url), 1000);
+      return true;
+    } catch { return false; }
   }
 
   function discordMovement(player) {
@@ -1562,7 +1639,7 @@ ${body}
     overlay.setAttribute('aria-modal', 'true');
     overlay.setAttribute('aria-labelledby', 'tehe-progress-title');
     overlay.innerHTML = `<div style="display:block;width:min(92vw,460px);max-height:90vh;overflow:auto;box-sizing:border-box;padding:16px;background:#202225;color:#f2f3f5;border:1px solid #555b64;border-radius:9px;box-shadow:0 14px 45px #000;font-family:Arial,sans-serif;">
-  <div id="tehe-progress-title" style="font-size:16px;font-weight:700;line-height:1.35;overflow-wrap:anywhere;">Preparing ${kind === 'discord' ? 'Discord' : kind === 'leaderboard' ? 'Full Faction' : 'Torn HTML'} Export</div>
+  <div id="tehe-progress-title" style="font-size:16px;font-weight:700;line-height:1.35;overflow-wrap:anywhere;">Preparing ${kind === 'discord' ? 'Discord' : kind === 'leaderboard' ? 'Full Faction JSON' : 'Torn HTML'} Export</div>
   <div data-progress-phase style="margin-top:5px;color:#9da3ad;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;">Starting</div>
   <div style="display:flex;justify-content:space-between;gap:8px;margin-top:12px;font-size:12px;"><span data-progress-message>Preparing export…</span><strong data-progress-percent>0%</strong></div>
   <div role="progressbar" aria-label="Export loading progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="display:block;width:100%;height:12px;margin-top:7px;box-sizing:border-box;overflow:hidden;background:#111318;border:1px solid #454a52;border-radius:7px;">
@@ -1580,7 +1657,7 @@ ${body}
       <select data-message-picker style="display:block;width:100%;margin-top:4px;padding:7px;box-sizing:border-box;background:#151619;color:#f2f3f5;border:1px solid #555b64;border-radius:4px;"></select>
     </label>
     <textarea data-output-preview readonly aria-label="Generated export preview" style="display:block;width:100%;height:130px;margin-top:9px;padding:8px;box-sizing:border-box;resize:vertical;background:#0f1012;color:#e8e9eb;border:1px solid #555b64;border-radius:4px;font:11px/1.4 monospace;white-space:pre-wrap;"></textarea>
-    <button type="button" data-copy-output style="display:inline-block;margin-top:10px;padding:8px 12px;box-sizing:border-box;background:#287c4d;color:#ffffff;border:1px solid #4bb878;border-radius:5px;font-weight:700;cursor:pointer;">Copy to Clipboard</button>
+    <button type="button" data-export-action style="display:inline-block;margin-top:10px;padding:8px 12px;box-sizing:border-box;background:#287c4d;color:#ffffff;border:1px solid #4bb878;border-radius:5px;font-weight:700;cursor:pointer;">${kind === 'leaderboard' ? 'Download JSON File' : 'Copy to Clipboard'}</button>
   </div>
   <button type="button" data-close-progress hidden style="display:inline-block;margin:10px 0 0 7px;padding:8px 12px;box-sizing:border-box;background:#34383f;color:#f2f3f5;border:1px solid #5a606a;border-radius:5px;font-weight:700;cursor:pointer;">Close</button>
 </div>`;
@@ -1605,10 +1682,11 @@ ${body}
     const preview = overlay.querySelector('[data-output-preview]');
     const pickerLabel = overlay.querySelector('[data-message-label]');
     const picker = overlay.querySelector('[data-message-picker]');
-    const copyButton = overlay.querySelector('[data-copy-output]');
+    const actionButton = overlay.querySelector('[data-export-action]');
     const closeButton = overlay.querySelector('[data-close-progress]');
     let current = { percent: 0 };
     let exportItems = [];
+    let exportFilename = '';
 
     const countText = (label, completed, total, suffix = '') => {
       if (total == null) return `${label}: discovering…`;
@@ -1635,8 +1713,9 @@ ${body}
       cacheNote.hidden = !current.cacheHit;
     }
 
-    function completeWithExport(payload) {
+    function completeWithExport(payload, options = {}) {
       exportItems = (Array.isArray(payload) ? payload : [payload]).map((item) => String(item || ''));
+      exportFilename = String(options.filename || '');
       picker.replaceChildren();
       exportItems.forEach((item, index) => {
         const option = global.document.createElement('option');
@@ -1648,8 +1727,12 @@ ${body}
       displaySelectedExport();
       output.hidden = false;
       closeButton.hidden = false;
-      update({ phase: 'complete', message: 'Export generated. Review it below, then copy when ready.', percent: 100 });
-      outputSummary.textContent = exportItems.length > 1
+      update({ phase: 'complete', message: kind === 'leaderboard'
+        ? 'JSON export generated. Review it below, then download when ready.'
+        : 'Export generated. Review it below, then copy when ready.', percent: 100 });
+      outputSummary.textContent = kind === 'leaderboard'
+        ? `JSON file ready: ${exportFilename}. Nothing has been downloaded yet.`
+        : exportItems.length > 1
         ? `${exportItems.length} Discord messages are ready. Select and copy each one in order.`
         : 'Export ready. Nothing has been copied yet.';
       dialog.scrollTop = dialog.scrollHeight;
@@ -1663,15 +1746,26 @@ ${body}
     }
 
     picker.addEventListener('change', displaySelectedExport);
-    copyButton.addEventListener('click', async () => {
+    actionButton.addEventListener('click', async () => {
       const index = selectedExportIndex();
+      if (kind === 'leaderboard') {
+        if (downloadJsonFile(exportItems[index] || '', exportFilename)) {
+          outputSummary.textContent = `Downloaded ${exportFilename}. The generated JSON remains available here for another download.`;
+          outputSummary.style.color = '#55d98a';
+          actionButton.textContent = 'Download JSON Again';
+        } else {
+          outputSummary.textContent = 'The browser could not start the JSON download. The JSON remains visible below.';
+          outputSummary.style.color = '#ffcf66';
+        }
+        return;
+      }
       const copied = await copyText(exportItems[index] || '');
       if (copied) {
         outputSummary.textContent = exportItems.length > 1
           ? `Copied Discord message ${index + 1} of ${exportItems.length}. The generated messages remain available here.`
           : 'Copied to the clipboard. The generated export remains available here for re-copying.';
         outputSummary.style.color = '#55d98a';
-        copyButton.textContent = 'Copy to Clipboard Again';
+        actionButton.textContent = 'Copy to Clipboard Again';
       } else {
         outputSummary.textContent = 'Clipboard permission was unavailable. The export is selected below for manual copying.';
         outputSummary.style.color = '#ffcf66';
@@ -1745,11 +1839,18 @@ ${body}
         progressDialog.completeWithExport(messages);
         setStatus(`${messages.length} Discord message${messages.length === 1 ? '' : 's'} ready to copy.`, 'success');
       } else {
-        const html = kind === 'newsletter' ? buildNewsletterHtml(snapshot) : buildLeaderboardHtml(snapshot);
+        const isJson = kind === 'leaderboard';
+        const payload = isJson ? buildFactionJson(snapshot) : buildNewsletterHtml(snapshot);
+        const filename = isJson ? factionJsonFilename(snapshot) : '';
         const savedExports = readHistory(await storageGet(STORAGE.exports, {}));
-        await storageSet(STORAGE.exports, { ...savedExports, [kind]: { generatedAt: new Date().toISOString(), payload: html } });
-        progressDialog.completeWithExport(html);
-        setStatus('Torn HTML ready to copy.', 'success');
+        await storageSet(STORAGE.exports, { ...savedExports, [kind]: {
+          generatedAt: new Date().toISOString(),
+          mediaType: isJson ? 'application/json' : 'text/html',
+          filename: filename || null,
+          payload,
+        } });
+        progressDialog.completeWithExport(payload, { filename });
+        setStatus(isJson ? 'Full faction JSON ready to download.' : 'Torn HTML ready to copy.', 'success');
       }
     } catch (error) {
       const errorMessage = error?.message || 'Export failed.';
@@ -1828,7 +1929,9 @@ ${body}
     classifyMember,
     buildNewsletterHtml,
     buildDiscordMessages,
-    buildLeaderboardHtml,
+    buildFactionJson,
+    factionJsonFilename,
+    downloadJsonFile,
     parseFactionIds,
     readHistory,
     readSharedRecord,
