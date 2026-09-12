@@ -58,7 +58,7 @@ const fixture = {
 };
 
 test('standalone userscript exposes three uniquely labelled export actions', () => {
-  assert.equal(exporter.VERSION, '1.4.0');
+  assert.equal(exporter.VERSION, '1.5.0');
   assert.deepEqual(Object.keys(exporter.BUTTON_LABELS), ['newsletter', 'discord', 'leaderboard']);
   assert.match(exporter.BUTTON_LABELS.newsletter, /Elimination Alliance Update/);
   assert.match(exporter.BUTTON_LABELS.discord, /Discord Markdown/);
@@ -134,6 +134,32 @@ test('userscript runs only on the Torn Elimination page', () => {
   assert.doesNotMatch(source, /^\/\/ @match\s+https:\/\/www\.torn\.com\/\*$/m);
 });
 
+test('export controls are compact inline buttons beside the Elimination heading', () => {
+  assert.match(source, /matches\('h1,h2,h3,h4,h5,\[role="heading"\]'\)/);
+  assert.match(source, /header\.appendChild\(panel\)/);
+  assert.match(source, />HTML Export<\/button>/);
+  assert.match(source, />Discord Export<\/button>/);
+  assert.match(source, />Full Faction Export<\/button>/);
+  assert.match(source, /#tehe-export-controls\{display:inline-flex/);
+  assert.doesNotMatch(source, /#tehe-export-panel\{position:fixed/);
+});
+
+test('each export opens detailed progress first and requires an explicit clipboard click', () => {
+  assert.match(source, /id = 'tehe-progress-overlay'/);
+  assert.match(source, /role="progressbar"/);
+  assert.match(source, /data-progress-percent>0%/);
+  assert.match(source, /API requests: discovering/);
+  assert.match(source, /Members: discovering/);
+  assert.match(source, /Chunks: discovering/);
+  assert.match(source, /MEMBER_PROGRESS_CHUNK_SIZE = 10/);
+  assert.match(source, />Copy to Clipboard<\/button>/);
+  assert.match(source, /Export ready\. Nothing has been copied yet\./);
+  assert.match(source, /picker\.addEventListener\('change', displaySelectedExport\)/);
+  assert.match(source, /copyButton\.addEventListener\('click', async \(\) =>/);
+  assert.doesNotMatch(source, /Message 1 was copied automatically/);
+  assert.doesNotMatch(source, /await deliver(?:Html|Discord)\(/);
+});
+
 test('clipboard-only requirement has no download implementation', () => {
   assert.doesNotMatch(source, /downloadHtml|createObjectURL|\.download\s*=/);
   assert.match(source, /GM_setClipboard/);
@@ -151,19 +177,30 @@ test('team mapping returns the agreed symbol and player-name color', () => {
 
 test('newsletter preserves centered bold headers, ranks, team styling and roasts', () => {
   const html = exporter.buildNewsletterHtml(fixture);
-  assert.match(html, /width:100%;max-width:601px;box-sizing:border-box/);
-  assert.match(html, /overflow:hidden;overflow-wrap:anywhere;word-break:break-word/);
-  assert.match(html, /text-align:center;font-weight:700/);
-  assert.match(html, />A<\/span> <span[^>]*>Alliance Rank/);
-  assert.match(html, />F<\/span> <span[^>]*>Faction Rank/);
+  assert.match(html, /display:block;width:auto;max-width:601px;min-width:0;margin:0 auto;padding:0;box-sizing:border-box/);
+  assert.match(html, /src="https:\/\/cdn\.jsdelivr\.net\/gh\/twitter\/twemoji@14\.0\.2\/assets\/72x72\/1f3c6\.png"/);
+  assert.match(html, /display:inline-block !important;width:25px !important;height:25px !important/);
+  assert.match(html, /<span[^>]*>1-3<\/span> Podium/);
+  assert.match(html, /<span[^>]*>A<\/span> Alliance Rank/);
+  assert.match(html, /<span[^>]*>F<\/span> Faction Rank/);
+  assert.equal((html.match(/>P[123]<\/span>/g) || []).length, 3);
+  assert.match(html, /\[\$3xy\] NAUGHTY SOULS/);
+  assert.match(html, /\[NaSa\] NAUGHTY SANCTUARY/);
+  assert.ok(html.indexOf('>SuperSheepie</a>') < html.indexOf('>XeQtEr</a>'));
+  assert.ok(html.indexOf('>XeQtEr</a>') < html.indexOf('>Emma_Watson_</a>'));
   assert.match(html, /href="https:\/\/www\.torn\.com\/profiles\.php\?XID=4009267"/);
   assert.match(html, /color:#ef5b55[^>]*>SuperSheepie/);
-  assert.match(html, />AX<\/span> <a href="https:\/\/www\.torn\.com\/profiles\.php\?XID=4009267"/);
-  assert.match(html, /Formerly <span style="color:#ff9f43/);
-  assert.match(html, /DROPPED OUT - WALL OF SHAME/);
+  assert.match(html, />AX<\/span>\s+<span style="color:#ef5b55[^>]*>APEX #1/);
+  assert.match(html, /Former <span style="color:#ff9f43/);
+  assert.match(html, /DROPPED OUT &mdash; WALL OF SHAME/);
+  for (const name of ['a1ry', 'Five', 'GORYDAMNREAPER', 'Atomic-Toast', 'Dscott138']) {
+    assert.match(html, new RegExp(`>${name}</a>`));
+  }
+  assert.doesNotMatch(html, /Former <span[^>]*>Loose Cannons #/);
   assert.match(html, /Brought the intimidating name/);
-  assert.match(html, /▲6/);
-  assert.match(html, /▼1/);
+  assert.match(html, /\(\+6\)/);
+  assert.match(html, /\(-1\)/);
+  assert.doesNotMatch(html, /href="\[https?:\/\//);
   assert.doesNotMatch(html, /[🏆🥇🥈🥉🟢🔵🔴🚀🧠🌿🪨🌋👁📐✨💣⚡🪑🐈⚔]/u);
   assert.doesNotMatch(html, /<(?:style|script)\b/i);
   assert.doesNotMatch(html, /Authorization|ApiKey|PDA-APIKEY/);
@@ -201,12 +238,13 @@ test('rank assignment is deterministic and calculates faction, team and movement
     player({ id: 1, name: 'Alpha', score: 10, attacks: 8, factionId: 100, teamName: 'APEX' }),
     player({ id: 3, name: 'Gamma', score: 9, attacks: 50, factionId: 200, teamName: 'Rocket Scientists' }),
   ], { 1: { allianceRank: 3 } });
-  assert.deepEqual(ranked.map((entry) => entry.id), [1, 2, 3]);
-  assert.equal(ranked[0].movement, 2);
+  assert.deepEqual(ranked.map((entry) => entry.id), [3, 1, 2]);
   assert.equal(ranked[0].factionRank, 1);
-  assert.equal(ranked[1].factionRank, 2);
-  assert.equal(ranked[1].teamRank, 2);
-  assert.equal(ranked[2].factionRank, 1);
+  assert.equal(ranked[1].movement, 1);
+  assert.equal(ranked[1].factionRank, 1);
+  assert.equal(ranked[1].teamRank, 1);
+  assert.equal(ranked[2].factionRank, 2);
+  assert.equal(ranked[2].teamRank, 2);
 });
 
 test('classification uses current teams and remembered former teams without exposing keys', () => {
@@ -219,14 +257,15 @@ test('classification uses current teams and remembered former teams without expo
   );
   const dropped = exporter.classifyMember(
     { id: 9, name: 'Dropped', factionId: 100 },
-    { name: 'Elimination', score: 0, attacks: 0, teamName: '', teamId: null },
-    { teamName: 'Loose Cannons' },
+    { name: 'Elimination', score: 0, attacks: 0, teamName: 'Loose Cannons', teamId: null },
+    null,
     standings,
   );
   assert.equal(active.status, 'active');
   assert.equal(active.teamScore, 999);
   assert.equal(dropped.status, 'dropped');
   assert.equal(dropped.teamName, 'Loose Cannons');
+  assert.equal(exporter.normalizeCompetition({ competition: { name: 'Elimination', score: 0, attacks: 0, team: 'Loose Cannons', team_id: null } }).teamId, null);
 });
 
 test('HTML escaping and faction parsing reject markup and invalid IDs', () => {
