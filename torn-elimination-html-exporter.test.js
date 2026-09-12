@@ -57,11 +57,13 @@ const fixture = {
   ],
 };
 
-test('standalone userscript exposes exactly two uniquely labelled export actions', () => {
-  assert.deepEqual(Object.keys(exporter.BUTTON_LABELS), ['newsletter', 'leaderboard']);
+test('standalone userscript exposes three uniquely labelled export actions', () => {
+  assert.deepEqual(Object.keys(exporter.BUTTON_LABELS), ['newsletter', 'discord', 'leaderboard']);
   assert.match(exporter.BUTTON_LABELS.newsletter, /Elimination Alliance Update/);
+  assert.match(exporter.BUTTON_LABELS.discord, /Discord Markdown/);
   assert.match(exporter.BUTTON_LABELS.leaderboard, /Full Faction Leaderboard/);
   assert.notEqual(exporter.BUTTON_LABELS.newsletter, exporter.BUTTON_LABELS.leaderboard);
+  assert.notEqual(exporter.BUTTON_LABELS.newsletter, exporter.BUTTON_LABELS.discord);
 });
 
 test('userscript runs only on the Torn Elimination page', () => {
@@ -78,7 +80,7 @@ test('clipboard-only requirement has no download implementation', () => {
 
 test('team mapping returns the agreed symbol and player-name color', () => {
   assert.deepEqual(exporter.teamStyle('Rocket Scientists'), {
-    name: 'Rocket Scientists', icon: '🚀', color: '#ff9f43',
+    name: 'Rocket Scientists', badge: 'RS', icon: '🚀', marker: '🟠', color: '#ff9f43',
   });
   assert.equal(exporter.teamStyle('Brain Surgeons').icon, '🧠');
   assert.equal(exporter.teamStyle('High Voltage').color, '#29abe2');
@@ -87,18 +89,39 @@ test('team mapping returns the agreed symbol and player-name color', () => {
 
 test('newsletter preserves centered bold headers, ranks, team styling and roasts', () => {
   const html = exporter.buildNewsletterHtml(fixture);
-  assert.match(html, /max-width:600px/);
+  assert.match(html, /width:100%;max-width:601px;box-sizing:border-box/);
+  assert.match(html, /overflow:hidden;overflow-wrap:anywhere;word-break:break-word/);
   assert.match(html, /text-align:center;font-weight:700/);
-  assert.match(html, /🅰 <span[^>]*>Alliance Rank/);
-  assert.match(html, /🅵 <span[^>]*>Faction Rank/);
+  assert.match(html, />A<\/span> <span[^>]*>Alliance Rank/);
+  assert.match(html, />F<\/span> <span[^>]*>Faction Rank/);
   assert.match(html, /href="https:\/\/www\.torn\.com\/profiles\.php\?XID=4009267"/);
   assert.match(html, /color:#ef5b55[^>]*>SuperSheepie/);
-  assert.match(html, /🚀 Former <span style="color:#ff9f43/);
-  assert.match(html, /DROPPED OUT — WALL OF SHAME/);
-  assert.match(html, /brought the intimidating name/);
+  assert.match(html, />AX<\/span> <a href="https:\/\/www\.torn\.com\/profiles\.php\?XID=4009267"/);
+  assert.match(html, /Formerly <span style="color:#ff9f43/);
+  assert.match(html, /DROPPED OUT - WALL OF SHAME/);
+  assert.match(html, /Brought the intimidating name/);
   assert.match(html, /▲6/);
   assert.match(html, /▼1/);
+  assert.doesNotMatch(html, /[🏆🥇🥈🥉🟢🔵🔴🚀🧠🌿🪨🌋👁📐✨💣⚡🪑🐈⚔]/u);
+  assert.doesNotMatch(html, /<(?:style|script)\b/i);
   assert.doesNotMatch(html, /Authorization|ApiKey|PDA-APIKEY/);
+});
+
+test('Discord export mirrors the approved native Markdown layout in mobile-safe messages', () => {
+  const messages = exporter.buildDiscordMessages(fixture);
+  assert.ok(messages.length >= 3);
+  assert.ok(messages.every((message) => message.length <= 1950));
+  const markdown = messages.join('\n\n');
+  assert.match(markdown, /^# 🏆 ELIMINATION ALLIANCE UPDATE/m);
+  assert.match(markdown, /^-# 🥇🥈🥉 Podium/m);
+  assert.ok(markdown.includes('## 💜 \\[$3XY\\] NAUGHTY SOULS'));
+  assert.match(markdown, /^### 🥇🥈🥉 PODIUM/m);
+  assert.match(markdown, /> 🥇 🔴 \*\*\[SuperSheepie\]\(<https:\/\/www\.torn\.com\/profiles\.php\?XID=4009267>\)\*\*/);
+  assert.match(markdown, /> -# 🚀 Rocket Scientists #1 • 188 attacks/);
+  assert.match(markdown, /Emma\\_Watson\\_/);
+  assert.match(markdown, /^# 🔴 DROPPED OUT/m);
+  assert.match(markdown, /Brought the intimidating name, left the attacks at zero/);
+  assert.doesNotMatch(markdown, /```ansi|\u001b\[/i);
 });
 
 test('full leaderboard includes all active and dropped participants by faction', () => {
