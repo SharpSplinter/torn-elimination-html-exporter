@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         Torn Elimination HTML Exporter
 // @namespace    https://github.com/SharpSplinter/torn-elimination-html-exporter
-// @version      1.2.0
+// @version      1.2.1
 // @description  Export styled Torn HTML newsletters, Discord updates, and full faction Elimination leaderboards.
 // @author       SharpSplinter
 // @homepageURL  https://github.com/SharpSplinter/torn-elimination-html-exporter
 // @supportURL   https://github.com/SharpSplinter/torn-elimination-html-exporter/issues
 // @downloadURL  https://raw.githubusercontent.com/SharpSplinter/torn-elimination-html-exporter/main/Torn%20Elimination%20HTML%20Exporter.user.js
 // @updateURL    https://raw.githubusercontent.com/SharpSplinter/torn-elimination-html-exporter/main/Torn%20Elimination%20HTML%20Exporter.user.js
-// @match        https://www.torn.com/page.php?sid=competition*
+// @match        https://www.torn.com/page.php?sid=elimination*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -20,7 +20,7 @@
 (function eliminationHtmlExporter(global) {
   'use strict';
 
-  const VERSION = '1.2.0';
+  const VERSION = '1.2.1';
   const API_BASE = 'https://api.torn.com/v2';
   const PDA_API_KEY = '###PDA-APIKEY###';
   const BUTTON_LABELS = Object.freeze({
