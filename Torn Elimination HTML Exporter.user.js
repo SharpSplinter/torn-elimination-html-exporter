@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Elimination HTML Exporter
 // @namespace    https://github.com/SharpSplinter/torn-elimination-html-exporter
-// @version      1.3.0
+// @version      1.4.0
 // @description  Export styled Torn HTML newsletters, Discord updates, and full faction Elimination leaderboards.
 // @author       SharpSplinter
 // @homepageURL  https://github.com/SharpSplinter/torn-elimination-html-exporter
@@ -20,7 +20,7 @@
 (function eliminationHtmlExporter(global) {
   'use strict';
 
-  const VERSION = '1.3.0';
+  const VERSION = '1.4.0';
   const API_BASE = 'https://api.torn.com/v2';
   const PDA_API_KEY = '###PDA-APIKEY###';
   const BUTTON_LABELS = Object.freeze({
@@ -32,7 +32,9 @@
     apiKey: 'tehe.apiKey',
     factionIds: 'tehe.factionIds',
     history: 'tehe.rankHistory.v1',
+    snapshot: 'tehe.snapshotCache.v1',
   });
+  const SNAPSHOT_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
   const REQUESTS_PER_MINUTE = 90;
   const REQUEST_START_INTERVAL_MS = Math.ceil(60000 / REQUESTS_PER_MINUTE);
   const MAX_CONCURRENT_REQUESTS = 6;
@@ -737,6 +739,52 @@ ${body}
     return { factions, players, generatedAt: new Date().toISOString() };
   }
 
+  function isSnapshotCacheFresh(entry, now = Date.now(), maxAgeMs = SNAPSHOT_CACHE_MAX_AGE_MS) {
+    const cachedAt = Number(entry?.cachedAt);
+    const snapshot = entry?.snapshot;
+    const age = now - cachedAt;
+    return Number.isFinite(cachedAt)
+      && age >= 0
+      && age < maxAgeMs
+      && Array.isArray(snapshot?.factions)
+      && Array.isArray(snapshot?.players);
+  }
+
+  function createSnapshotProvider(options) {
+    const {
+      loadCache,
+      saveCache,
+      fetchSnapshot,
+      now = () => Date.now(),
+      maxAgeMs = SNAPSHOT_CACHE_MAX_AGE_MS,
+      onCacheHit = () => {},
+    } = options;
+    let memoryCache = null;
+    let inFlight = null;
+
+    return function getSnapshot(context) {
+      if (inFlight) return inFlight;
+      inFlight = (async () => {
+        const checkedAt = now();
+        let cached = memoryCache;
+        if (!isSnapshotCacheFresh(cached, checkedAt, maxAgeMs)) cached = await loadCache();
+        if (isSnapshotCacheFresh(cached, checkedAt, maxAgeMs)) {
+          memoryCache = cached;
+          onCacheHit(cached, checkedAt, context);
+          return cached.snapshot;
+        }
+
+        const snapshot = await fetchSnapshot(context);
+        const entry = { cachedAt: now(), snapshot };
+        memoryCache = entry;
+        await saveCache(entry);
+        return snapshot;
+      })();
+      inFlight.finally(() => { inFlight = null; }).catch(() => {});
+      return inFlight;
+    };
+  }
+
   function isUsableKey(key) {
     return Boolean(key && key !== PDA_API_KEY && key.length >= 10);
   }
@@ -847,13 +895,25 @@ ${body}
     element.style.color = tone === 'error' ? '#ff7b8d' : tone === 'success' ? '#55d98a' : '#c7cbd1';
   }
 
+  const getExportSnapshot = createSnapshotProvider({
+    loadCache: () => storageGet(STORAGE.snapshot, null),
+    saveCache: (entry) => storageSet(STORAGE.snapshot, entry),
+    fetchSnapshot: async (onProgress) => {
+      const apiKey = await resolveApiKey();
+      const factionIds = await resolveFactionScope(apiKey);
+      return collectSnapshot(apiKey, factionIds, onProgress);
+    },
+    onCacheHit: (entry, now, onProgress) => {
+      const secondsRemaining = Math.max(1, Math.ceil((SNAPSHOT_CACHE_MAX_AGE_MS - (now - entry.cachedAt)) / 1000));
+      onProgress(`Using cached live data; refresh required in ${secondsRemaining} seconds.`);
+    },
+  });
+
   async function runExport(kind, buttons) {
     buttons.forEach((button) => { button.disabled = true; });
     try {
       setStatus('Preparing export…');
-      const apiKey = await resolveApiKey();
-      const factionIds = await resolveFactionScope(apiKey);
-      const snapshot = await collectSnapshot(apiKey, factionIds, (message) => setStatus(message));
+      const snapshot = await getExportSnapshot((message) => setStatus(message));
       if (kind === 'discord') {
         const messages = buildDiscordMessages(snapshot);
         const copied = await deliverDiscord(messages);
@@ -902,6 +962,7 @@ ${body}
 
   const core = Object.freeze({
     VERSION,
+    SNAPSHOT_CACHE_MAX_AGE_MS,
     REQUESTS_PER_MINUTE,
     REQUEST_START_INTERVAL_MS,
     MAX_CONCURRENT_REQUESTS,
@@ -928,6 +989,8 @@ ${body}
     roastPlayer,
     packDiscordBlocks,
     createRequestScheduler,
+    isSnapshotCacheFresh,
+    createSnapshotProvider,
     pacedMap,
   });
 
