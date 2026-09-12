@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Elimination HTML Exporter
 // @namespace    https://github.com/SharpSplinter/torn-elimination-html-exporter
-// @version      1.5.0
+// @version      1.6.0
 // @description  Export styled Torn HTML newsletters, Discord updates, and full faction Elimination leaderboards.
 // @author       SharpSplinter
 // @homepageURL  https://github.com/SharpSplinter/torn-elimination-html-exporter
@@ -20,7 +20,7 @@
 (function eliminationHtmlExporter(global) {
   'use strict';
 
-  const VERSION = '1.5.0';
+  const VERSION = '1.6.0';
   const API_BASE = 'https://api.torn.com/v2';
   const PDA_API_KEY = '###PDA-APIKEY###';
   const BUTTON_LABELS = Object.freeze({
@@ -31,8 +31,10 @@
   const STORAGE = Object.freeze({
     apiKey: 'tehe.apiKey',
     factionIds: 'tehe.factionIds',
-    history: 'tehe.rankHistory.v2',
-    snapshot: 'tehe.snapshotCache.v2',
+    history: 'tehe.rankHistory.v3',
+    snapshot: 'tehe.snapshotCache.v3',
+    participants: 'tehe.participantLedger.v1',
+    exports: 'tehe.generatedExports.v1',
   });
   const SNAPSHOT_CACHE_MAX_AGE_MS = 5 * 60 * 1000;
   const REQUESTS_PER_MINUTE = 90;
@@ -55,12 +57,101 @@
     'nine lives': { name: 'Nine Lives', badge: 'NL', icon: '🐈', marker: '⚪', color: '#b8bed8' },
   });
 
+  const DEFAULT_ALLIANCE_FACTION_IDS = Object.freeze([8317, 44817]);
+  const PARTICIPANT_SEED_DATA = Object.freeze([
+    [4009267, 'SuperSheepie', 8317, 'Naughty Souls', '$3xy', 'APEX', 324, 'active', 1],
+    [2712243, 'XeQtEr', 8317, 'Naughty Souls', '$3xy', 'Rocket Scientists', 210, 'active', 2],
+    [3862240, 'Emma_Watson_', 8317, 'Naughty Souls', '$3xy', 'APEX', 185, 'active', 3],
+    [2730860, 'Pepe', 44817, 'Naughty Sanctuary', 'NaSa', 'APEX', 175, 'active', 4],
+    [2008496, 'Chipmunk05', 8317, 'Naughty Souls', '$3xy', 'Touching Grass', 165, 'active', 5],
+    [4033939, 'Daza', 44817, 'Naughty Sanctuary', 'NaSa', 'Rocket Scientists', 140, 'active', 6],
+    [511200, 'TrevorSentMe', 8317, 'Naughty Souls', '$3xy', 'Loose Cannons', 140, 'active', 7],
+    [2329877, 'mrmurmur', 8317, 'Naughty Souls', '$3xy', 'Rocket Scientists', 134, 'active', 8],
+    [3695479, 'diabeeetus', 8317, 'Naughty Souls', '$3xy', 'Conspiracy Theorists', 126, 'active', 9],
+    [1884498, 'Bastid', 8317, 'Naughty Souls', '$3xy', 'Rocket Scientists', 119, 'active', 10],
+    [1017334, 'bluetorpedo', 8317, 'Naughty Souls', '$3xy', 'Inanimate Objects', 107, 'active', 11],
+    [3155545, 'Geegox', 8317, 'Naughty Souls', '$3xy', 'Inanimate Objects', 96, 'active', 12],
+    [4113817, 'Akira-', 8317, 'Naughty Souls', '$3xy', 'High Voltage', 94, 'active', 13],
+    [180991, 'stewart_1322', 8317, 'Naughty Souls', '$3xy', 'Sticks and Stones', 90, 'active', 14],
+    [351311, 'SharpSplinter', 8317, 'Naughty Souls', '$3xy', 'Rocket Scientists', 84, 'active', 15],
+    [3878312, 'MAR_The_Wrecker', 8317, 'Naughty Souls', '$3xy', 'Brain Surgeons', 77, 'active', 16],
+    [433007, 'Forewarned', 8317, 'Naughty Souls', '$3xy', 'High Voltage', 75, 'active', 17],
+    [2759312, 'Alterend', 44817, 'Naughty Sanctuary', 'NaSa', 'Loose Cannons', 61, 'active', 18],
+    [439563, 'bekoe', 8317, 'Naughty Souls', '$3xy', 'Gold Dust', 61, 'active', 19],
+    [3875439, 'JOHNWICK0800', 8317, 'Naughty Souls', '$3xy', 'Touching Grass', 60, 'active', 20],
+    [2199693, 'sopwithcamel74', 8317, 'Naughty Souls', '$3xy', 'Sticks and Stones', 58, 'active', 21],
+    [315131, '84t0n9', 8317, 'Naughty Souls', '$3xy', 'Inanimate Objects', 57, 'active', 22],
+    [2276692, 'Capnaron', 8317, 'Naughty Souls', '$3xy', 'Nine Lives', 56, 'active', 23],
+    [2790448, 'SwivelDice2511', 44817, 'Naughty Sanctuary', 'NaSa', 'Nine Lives', 47, 'active', 24],
+    [556477, 'Cool_Connor', 44817, 'Naughty Sanctuary', 'NaSa', 'Brain Surgeons', 41, 'active', 25],
+    [3904552, 'amoore1817', 44817, 'Naughty Sanctuary', 'NaSa', 'APEX', 34, 'active', 26],
+    [1893293, '-VJ-', 8317, 'Naughty Souls', '$3xy', 'Gold Dust', 33, 'active', 27],
+    [2148992, 'Vulpes_Ramos', 44817, 'Naughty Sanctuary', 'NaSa', 'Conspiracy Theorists', 31, 'active', 28],
+    [3513709, 'WO1VERINE', 8317, 'Naughty Souls', '$3xy', 'APEX', 30, 'active', 29],
+    [1160594, 'DamianWayne', 8317, 'Naughty Souls', '$3xy', 'Reptilians', 29, 'active', 30],
+    [4143951, 'Jack_Hammer7697', 44817, 'Naughty Sanctuary', 'NaSa', 'Reptilians', 27, 'active', 31],
+    [3765920, 'R34P3R6666', 8317, 'Naughty Souls', '$3xy', 'Reptilians', 25, 'active', 32],
+    [4002553, 'Scorpio23', 8317, 'Naughty Souls', '$3xy', 'Touching Grass', 25, 'active', 33],
+    [21208, 'Crawdacity', 8317, 'Naughty Souls', '$3xy', 'Nine Lives', 24, 'active', 34],
+    [2424452, 'SassySunny', 8317, 'Naughty Souls', '$3xy', 'Brain Surgeons', 22, 'active', 35],
+    [3583932, 'a1ry', 8317, 'Naughty Souls', '$3xy', 'Loose Cannons', 19, 'dropped', 36],
+    [4174284, 'Kamkon10', 44817, 'Naughty Sanctuary', 'NaSa', 'Conspiracy Theorists', 16, 'active', 37],
+    [4250310, 'Litzacbentheo', 44817, 'Naughty Sanctuary', 'NaSa', 'Brain Surgeons', 16, 'active', 38],
+    [2911585, '-Beau-', 8317, 'Naughty Souls', '$3xy', 'Inanimate Objects', 13, 'active', 39],
+    [3841028, 'DoobzMan', 8317, 'Naughty Souls', '$3xy', 'Nine Lives', 13, 'active', 40],
+    [442754, 'MMTC', 8317, 'Naughty Souls', '$3xy', 'Rocket Scientists', 12, 'active', 41],
+    [2323855, 'Alascato', 8317, 'Naughty Souls', '$3xy', 'Touching Grass', 11, 'active', 42],
+    [4063648, 'R34LDAWG', 44817, 'Naughty Sanctuary', 'NaSa', 'APEX', 11, 'active', 43],
+    [242566, 'Graplette', 44817, 'Naughty Sanctuary', 'NaSa', 'Conspiracy Theorists', 10, 'active', 44],
+    [4016119, 'Babbumbee', 44817, 'Naughty Sanctuary', 'NaSa', 'Rocket Scientists', 9, 'active', 45],
+    [3469677, 'Ekka', 8317, 'Naughty Souls', '$3xy', 'APEX', 9, 'active', 46],
+    [4020135, 'Zoalmegustar', 44817, 'Naughty Sanctuary', 'NaSa', 'Rocket Scientists', 7, 'active', 47],
+    [1710822, 'Inkhart', 8317, 'Naughty Souls', '$3xy', 'Gold Dust', 5, 'active', 48],
+    [2113382, 'tepigflamet', 44817, 'Naughty Sanctuary', 'NaSa', 'Brain Surgeons', 5, 'active', 49],
+    [2037571, 'Weedy', 8317, 'Naughty Souls', '$3xy', 'Loose Cannons', 5, 'active', 50],
+    [1078273, 'mashkoor', 8317, 'Naughty Souls', '$3xy', 'Nine Lives', 2, 'active', 51],
+    [4377323, 'AllieWally', 44817, 'Naughty Sanctuary', 'NaSa', 'Touching Grass', 1, 'active', 52],
+    [24780, 'Irix', 8317, 'Naughty Souls', '$3xy', 'Reptilians', 1, 'active', 53],
+    [319602, 'Angelsman', 8317, 'Naughty Souls', '$3xy', 'Brain Surgeons', 0, 'active', 54],
+    [4046561, 'KousakaKun', 44817, 'Naughty Sanctuary', 'NaSa', 'Touching Grass', 0, 'active', 55],
+    [3797288, 'NANOO', 44817, 'Naughty Sanctuary', 'NaSa', 'Loose Cannons', 0, 'active', 56],
+    [3676010, 'Atomic-Toast', 44817, 'Naughty Sanctuary', 'NaSa', 'Rocket Scientists', 0, 'dropped', 65],
+    [2911255, 'Dscott138', 44817, 'Naughty Sanctuary', 'NaSa', 'Reptilians', 0, 'dropped', 84],
+    [959585, 'Five', 8317, 'Naughty Souls', '$3xy', 'Sticks and Stones', 0, 'dropped', 93],
+    [4093649, 'GORYDAMNREAPER', 8317, 'Naughty Souls', '$3xy', 'Loose Cannons', 0, 'dropped', 101],
+    [3952272, 'jinglely', 44817, 'Naughty Sanctuary', 'NaSa', 'Nine Lives', 0, 'dropped', 111],
+    [3942933, 'KidLaRona', 8317, 'Naughty Souls', '$3xy', 'High Voltage', 0, 'dropped', 118],
+    [3485404, 'smk47', 8317, 'Naughty Souls', '$3xy', 'Gold Dust', 0, 'dropped', 155],
+  ]);
+  const SEEDED_DROPOUT_FACTION_RANKS = Object.freeze({
+    3583932: 28,
+    3676010: 23,
+    2911255: 35,
+    959585: 52,
+    4093649: 56,
+    3952272: 48,
+    3942933: 67,
+    3485404: 85,
+  });
+  const SEEDED_ZERO_RANK_ANCHORS = Object.freeze({ alliancePositive: 53, factionPositive: { 8317: 37, 44817: 16 } });
+  const PARTICIPANT_SEED = Object.freeze(PARTICIPANT_SEED_DATA.map((row) => Object.freeze({
+    id: row[0], name: row[1], factionId: row[2], factionName: row[3], factionTag: row[4],
+    teamName: row[5], attacks: row[6], status: row[7], allianceRank: row[8],
+    factionRank: SEEDED_DROPOUT_FACTION_RANKS[row[0]] || null,
+    zeroRankAlliancePositiveCount: row[7] === 'dropped' && row[6] === 0 ? SEEDED_ZERO_RANK_ANCHORS.alliancePositive : null,
+    zeroRankFactionPositiveCount: row[7] === 'dropped' && row[6] === 0 ? SEEDED_ZERO_RANK_ANCHORS.factionPositive[row[2]] : null,
+    enrolled: true,
+  })));
+
   const KNOWN_FORMER_TEAMS = Object.freeze({
     3583932: 'Loose Cannons',
     959585: 'Sticks and Stones',
     4093649: 'Loose Cannons',
     3676010: 'Rocket Scientists',
     2911255: 'Reptilians',
+    3952272: 'Nine Lives',
+    3942933: 'High Voltage',
+    3485404: 'Gold Dust',
   });
 
   const SPECIAL_ROASTS = Object.freeze({
@@ -187,16 +278,27 @@
         name,
         score: toNumber(candidate.score ?? item?.score),
         position: toNumber(candidate.position ?? candidate.rank ?? item?.position, null),
+        eliminated: Boolean(candidate.eliminated ?? item?.eliminated),
+        participants: toNumber(candidate.participants ?? item?.participants, null),
+        participantsLeft: toNumber(candidate.participants_left ?? item?.participants_left, null),
       };
       if (normalized.id) byId.set(normalized.id, normalized);
       byName.set(canonicalTeamName(name), normalized);
     }
-    return { byId, byName };
+    return { byId, byName, valid: records.length > 0 };
   }
 
   function normalizeCompetition(payload) {
     const source = unwrap(payload, 'competition') || {};
+    const valid = Boolean(source && typeof source === 'object' && (
+      Object.hasOwn(source, 'name')
+      || Object.hasOwn(source, 'competition')
+      || Object.hasOwn(source, 'team')
+      || Object.hasOwn(source, 'team_id')
+      || Object.hasOwn(source, 'attacks')
+    ));
     return {
+      valid,
       name: String(source.name || source.competition || ''),
       score: toNumber(source.score),
       attacks: toNumber(source.attacks),
@@ -210,6 +312,7 @@
       toNumber(b.attacks) - toNumber(a.attacks) ||
       toNumber(b.score) - toNumber(a.score) ||
       (a.status === 'active' ? 0 : 1) - (b.status === 'active' ? 0 : 1) ||
+      toNumber(a.allianceRank, Number.MAX_SAFE_INTEGER) - toNumber(b.allianceRank, Number.MAX_SAFE_INTEGER) ||
       String(a.name).localeCompare(String(b.name), undefined, { sensitivity: 'base' }) ||
       toNumber(a.id) - toNumber(b.id)
     );
@@ -217,10 +320,17 @@
 
   function assignRanks(players, previousHistory = {}) {
     const sorted = [...players].sort(participantComparator);
+    const alliancePositiveCount = sorted.filter((player) => player.attacks > 0).length;
     sorted.forEach((player, index) => {
+      const previous = previousHistory[player.id] || {};
+      const previousRank = toNumber(previous.allianceRank, null);
       player.allianceRank = index + 1;
-      const previousRank = toNumber(previousHistory[player.id]?.allianceRank, null);
       player.movement = previousRank ? previousRank - player.allianceRank : 0;
+      if (player.status === 'dropped' && player.attacks === 0 && previousRank) {
+        const anchor = toNumber(previous.zeroRankAlliancePositiveCount, alliancePositiveCount);
+        player.allianceRank = Math.max(1, previousRank + alliancePositiveCount - anchor);
+        player.movement = previousRank - player.allianceRank;
+      }
     });
 
     const factions = new Map();
@@ -229,13 +339,24 @@
       if (!factions.has(player.factionId)) factions.set(player.factionId, []);
       factions.get(player.factionId).push(player);
       const teamKey = canonicalTeamName(player.teamName);
-      if (teamKey) {
+      player.teamRank = null;
+      if (player.status === 'active' && teamKey) {
         if (!teams.has(teamKey)) teams.set(teamKey, []);
         teams.get(teamKey).push(player);
       }
     }
     for (const group of factions.values()) {
-      group.sort(participantComparator).forEach((player, index) => { player.factionRank = index + 1; });
+      const factionPositiveCount = group.filter((player) => player.attacks > 0).length;
+      group.sort(participantComparator).forEach((player, index) => {
+        const previous = previousHistory[player.id] || {};
+        const previousRank = toNumber(previous.factionRank, null);
+        if (player.status === 'dropped' && player.attacks === 0 && previousRank) {
+          const anchor = toNumber(previous.zeroRankFactionPositiveCount, factionPositiveCount);
+          player.factionRank = Math.max(1, previousRank + factionPositiveCount - anchor);
+        } else {
+          player.factionRank = index + 1;
+        }
+      });
     }
     for (const group of teams.values()) {
       group.sort(participantComparator).forEach((player, index) => { player.teamRank = index + 1; });
@@ -244,29 +365,35 @@
   }
 
   function classifyMember(member, competition, prior, standings) {
+    if (prior?.enrolled && prior.status === 'dropped') {
+      return { ...member, ...prior, status: 'dropped', enrolled: true, teamRank: null };
+    }
     const inElimination = /elimination/i.test(competition.name);
     let currentTeam = competition.teamName;
     if (!currentTeam && competition.teamId && standings.byId.has(competition.teamId)) {
       currentTeam = standings.byId.get(competition.teamId).name;
     }
     const previousTeam = prior?.teamName || KNOWN_FORMER_TEAMS[member.id] || '';
-    const hasCurrentTeam = competition.teamId != null;
-    const status = inElimination && hasCurrentTeam
-      ? 'active'
-      : inElimination
-        ? 'dropped'
-        : 'inactive';
     const teamName = currentTeam || previousTeam;
     const standing = standings.byId.get(competition.teamId) || standings.byName.get(canonicalTeamName(teamName));
+    const wasEnrolled = Boolean(prior?.enrolled);
+    const newlyEnrolled = inElimination && competition.teamId != null && Boolean(standing);
+    const enrolled = wasEnrolled || newlyEnrolled;
+    let status = 'inactive';
+    if (enrolled && standing?.eliminated) status = 'dropped';
+    else if (enrolled && competition.valid && inElimination && competition.teamId != null && standing) status = 'active';
+    else if (enrolled && competition.valid) status = 'dropped';
+    else if (enrolled) status = prior?.status || 'active';
     return {
       ...member,
       status,
+      enrolled,
       teamName,
       teamId: competition.teamId || standing?.id || null,
       teamScore: standing?.score ?? competition.score,
       teamPosition: standing?.position ?? null,
-      score: competition.score,
-      attacks: competition.attacks,
+      score: Math.max(toNumber(prior?.score), competition.score),
+      attacks: Math.max(toNumber(prior?.attacks), competition.attacks),
     };
   }
 
@@ -502,33 +629,32 @@ ${body}
     const dropped = players.filter((player) => player.status === 'dropped');
     const parts = [newsletterHeaderHtml()];
 
-    factions.forEach((faction, index) => {
-      const group = activeTop.filter((player) => player.factionId === faction.id);
-      if (!group.length) return;
-      parts.push(newsletterFactionHeaderHtml(faction, index));
-      const podium = group.filter((player) => player.allianceRank <= 3);
-      const topTen = group.filter((player) => player.allianceRank > 3 && player.allianceRank <= 10);
-      const topFifteen = group.filter((player) => player.allianceRank > 10 && player.allianceRank <= 15);
-      if (podium.length) {
-        parts.push(newsletterSectionHeaderHtml('PODIUM', '#f2a51a'));
-        parts.push(...podium.map(newsletterPlayerRowHtml));
-      }
-      if (topTen.length) {
-        parts.push(newsletterSectionHeaderHtml('ALLIANCE TOP 10', '#35d07f'));
-        parts.push(...topTen.map(newsletterPlayerRowHtml));
-      }
-      if (topFifteen.length) {
-        parts.push(newsletterSectionHeaderHtml('ALLIANCE TOP 15', '#4da3ff'));
-        parts.push(...topFifteen.map(newsletterPlayerRowHtml));
-      }
-      parts.push(newsletterFactionSummaryHtml(faction, group, index));
-    });
+    const sections = [
+      { label: 'PODIUM', color: '#f2a51a', group: activeTop.filter((player) => player.allianceRank <= 3) },
+      { label: 'ALLIANCE TOP 10', color: '#35d07f', group: activeTop.filter((player) => player.allianceRank > 3 && player.allianceRank <= 10) },
+      { label: 'ALLIANCE TOP 15', color: '#4da3ff', group: activeTop.filter((player) => player.allianceRank > 10 && player.allianceRank <= 15) },
+    ];
+    for (const section of sections) {
+      parts.push(newsletterSectionHeaderHtml(section.label, section.color));
+      if (section.group.length) parts.push(...section.group.map(newsletterPlayerRowHtml));
+      else parts.push('<div style="display:block;width:auto;margin:6px 0;padding:8px;box-sizing:border-box;text-align:center;color:#9ca3ad;background:#1d1f24;border:1px solid #34363b;border-radius:3px;">No confirmed active participant currently holds this range.</div>');
+    }
 
-    if (dropped.length) {
-      parts.push(`<div style="display:block;width:auto;min-width:0;margin:19px 0 0;padding:10px 6px;box-sizing:border-box;text-align:center;font-size:17px;font-weight:700;line-height:1.35;color:#ff788a;background:linear-gradient(90deg,#30171d,#411c25,#30171d);border:1px solid #ff5d73;border-radius:4px;white-space:normal;overflow-wrap:anywhere;">
+    const summaries = factions.map((faction) => {
+      const group = activeTop.filter((player) => player.factionId === faction.id);
+      return group.length ? `<strong>${escapeHtml(faction.name)}:</strong> ${escapeHtml(factionSummary(group))}` : '';
+    }).filter(Boolean);
+    if (summaries.length) {
+      parts.push(`<div style="display:block;width:auto;min-width:0;margin:10px 0 0;padding:8px;box-sizing:border-box;background:rgba(77,163,255,0.08);border-radius:4px;font-size:12px;line-height:1.5;white-space:normal;overflow-wrap:anywhere;">
+  ${summaries.join('<br>')}
+</div>`);
+    }
+
+    parts.push(`<div style="display:block;width:auto;min-width:0;margin:19px 0 0;padding:10px 6px;box-sizing:border-box;text-align:center;font-size:17px;font-weight:700;line-height:1.35;color:#ff788a;background:linear-gradient(90deg,#30171d,#411c25,#30171d);border:1px solid #ff5d73;border-radius:4px;white-space:normal;overflow-wrap:anywhere;">
   <span style="display:inline-block;padding:2px 5px;margin-right:3px;box-sizing:border-box;background:#ff5d73;color:#1b0d10;font-size:10px;border-radius:3px;">OUT</span>
   DROPPED OUT &mdash; WALL OF SHAME
 </div>`);
+    if (dropped.length) {
       factions.forEach((faction, index) => {
         const group = dropped.filter((player) => player.factionId === faction.id);
         if (!group.length) return;
@@ -543,6 +669,8 @@ ${body}
 </div>`);
         }
       });
+    } else {
+      parts.push('<div style="display:block;width:auto;margin:6px 0;padding:8px;box-sizing:border-box;text-align:center;color:#9ca3ad;background:#231a1e;border:1px solid #493039;border-radius:3px;">No confirmed enrolled participants have dropped out.</div>');
     }
 
     parts.push(`<div style="display:block;width:auto;min-width:0;margin:17px 0 0;padding:9px 5px;box-sizing:border-box;text-align:center;font-size:12px;font-weight:700;line-height:1.5;border-top:1px solid #3b3e44;white-space:normal;overflow-wrap:anywhere;">
@@ -597,14 +725,37 @@ ${body}
 
   function discordPlayerCard(player, includeRoast = false) {
     const team = teamStyle(player.teamName);
-    const teamRank = player.teamRank ? ` #${player.teamRank}` : '';
+    const faction = factionStyle({ name: player.factionName, tag: player.factionTag });
+    const teamRank = player.status === 'active' && player.teamRank ? ` #${player.teamRank}` : '';
     const former = player.status === 'dropped' ? 'Formerly ' : '';
     const lines = [
-      `> ${discordPlacementIcon(player)}${team.marker} ${discordProfileLink(player)} — 🟧 **A#${formatRank(player.allianceRank)}**${discordMovement(player)} • 🟦 **F#${formatRank(player.factionRank)}**`,
+      `> ${discordPlacementIcon(player)}${faction.icon} ${team.marker} ${discordProfileLink(player)} — 🟧 **A#${formatRank(player.allianceRank)}**${discordMovement(player)} • 🟦 **F#${formatRank(player.factionRank)}**`,
       `> -# ${team.icon} ${former}${escapeDiscord(team.name)}${teamRank} • ${player.attacks.toLocaleString()} attacks`,
     ];
     if (includeRoast) lines.push(`> *${escapeDiscord(roastPlayer(player))}*`);
     return lines.join('\n');
+  }
+
+  function discordDropoutRoast(player) {
+    const special = {
+      a1ry: `${player.attacks} attacks, then a ${Math.max(0, player.movement)}-place climb straight through the exit.`,
+      Five: 'Five attacks short of expectations: a flawless zero.',
+      GORYDAMNREAPER: 'Intimidating name, zero attacks, absolutely nothing reaped.',
+      'Atomic-Toast': 'Skipped atomic and went straight to toast: zero attacks.',
+      Dscott138: 'Vanished quietly enough to leave zero attacks behind.',
+    };
+    if (special[player.name]) return special[player.name];
+    if (player.attacks === 0) return `${player.name}: zero attacks; spectator mode secured.`;
+    return `${player.name}: ${player.attacks} attacks before the exit won.`;
+  }
+
+  function discordDropoutCard(player) {
+    const team = teamStyle(player.teamName);
+    return [
+      `> ${team.marker} ${discordProfileLink(player)} — 🟧 **A#${formatRank(player.allianceRank)}**${discordMovement(player)} • 🟦 **F#${formatRank(player.factionRank)}** • ${player.attacks.toLocaleString()} attacks`,
+      `> -# ${team.icon} Formerly ${escapeDiscord(team.name)}`,
+      `> *${escapeDiscord(discordDropoutRoast(player))}*`,
+    ].join('\n');
   }
 
   function discordFactionHeader(faction, index, continued = false) {
@@ -644,45 +795,41 @@ ${body}
     const players = snapshot.players || [];
     const factions = snapshot.factions || [];
     const activeTop = players.filter((player) => player.status === 'active' && player.allianceRank <= 15);
-    const activeFactions = factions
-      .map((faction, index) => ({ faction, index, group: activeTop.filter((player) => player.factionId === faction.id) }))
-      .filter((entry) => entry.group.length);
     const globalHeader = '# 🏆 ELIMINATION ALLIANCE UPDATE\n-# 🥇🥈🥉 Podium • 🟢 Alliance Top 10 • 🔵 Alliance Top 15 • 🔴 Dropped Out\n-# 🟧 A = Alliance Rank • 🟦 F = Faction Rank • ▲ / ▼ = Movement';
-    const messages = [];
-
-    if (activeFactions.length) {
-      const [first, ...remaining] = activeFactions;
-      const opening = [globalHeader, discordFactionHeader(first.faction, first.index), ...discordRankSections(first.group, ['podium', 'topTen'])];
-      messages.push(...packDiscordBlocks(opening));
-
-      const continuation = [
-        discordFactionHeader(first.faction, first.index, true),
-        ...discordRankSections(first.group, ['topFifteen']),
-        `**${escapeDiscord(first.faction.name.toUpperCase())} SNAPSHOT:** ${escapeDiscord(factionSummary(first.group))}`,
-      ];
-      for (const entry of remaining) {
-        continuation.push(
-          discordFactionHeader(entry.faction, entry.index),
-          ...discordRankSections(entry.group),
-          `**${escapeDiscord(entry.faction.name.toUpperCase())} SNAPSHOT:** ${escapeDiscord(factionSummary(entry.group))}`,
-        );
-      }
-      messages.push(...packDiscordBlocks(continuation));
-    } else {
-      messages.push(`${globalHeader}\n\n_No active top-fifteen participants were found for the selected faction scope._`);
-    }
-
+    const podium = activeTop.filter((player) => player.allianceRank <= 3);
+    const topTen = activeTop.filter((player) => player.allianceRank > 3 && player.allianceRank <= 10);
+    const topFifteen = activeTop.filter((player) => player.allianceRank > 10 && player.allianceRank <= 15);
+    const messageOneBlocks = [
+      globalHeader,
+      '### 🥇🥈🥉 PODIUM',
+      ...(podium.length ? podium.map((player) => discordPlayerCard(player)) : ['_No confirmed active podium participants._']),
+      '### 🟢 ALLIANCE TOP 10',
+      ...(topTen.length ? topTen.map((player) => discordPlayerCard(player)) : ['_No confirmed active participants currently hold ranks 4–10._']),
+    ];
+    const snapshots = factions.map((faction) => {
+      const group = activeTop.filter((player) => player.factionId === faction.id);
+      return group.length ? `**${escapeDiscord(faction.name.toUpperCase())} SNAPSHOT:** ${escapeDiscord(factionSummary(group))}` : '';
+    }).filter(Boolean);
+    const messageTwoBlocks = [
+      '# 🔵 ELIMINATION ALLIANCE UPDATE — CONTINUED',
+      '### 🔵 ALLIANCE TOP 15',
+      ...(topFifteen.length ? topFifteen.map((player) => discordPlayerCard(player)) : ['_No confirmed active participants currently hold ranks 11–15._']),
+      ...snapshots,
+    ];
     const dropped = players.filter((player) => player.status === 'dropped');
+    const dropoutBlocks = ['# 🔴 DROPPED OUT\n-# WALL OF SHAME • Game-performance roast edition'];
     if (dropped.length) {
-      const dropoutBlocks = ['# 🔴 DROPPED OUT\n-# WALL OF SHAME • Game-performance roast edition'];
       factions.forEach((faction, index) => {
         const group = dropped.filter((player) => player.factionId === faction.id);
         if (!group.length) return;
-        dropoutBlocks.push(discordFactionHeader(faction, index), ...group.map((player) => discordPlayerCard(player, true)));
+        dropoutBlocks.push(discordFactionHeader(faction, index), ...group.map(discordDropoutCard));
       });
-      messages.push(...packDiscordBlocks(dropoutBlocks));
+    } else {
+      dropoutBlocks.push('_No confirmed enrolled participants have dropped out._');
     }
-
+    const messages = [messageOneBlocks.join('\n\n'), messageTwoBlocks.join('\n\n'), dropoutBlocks.join('\n\n')];
+    const oversized = messages.findIndex((message) => message.length > 1950);
+    if (oversized >= 0) throw new Error(`Discord message ${oversized + 1} exceeds the 1,950-character mobile-safe limit.`);
     return messages;
   }
 
@@ -701,6 +848,114 @@ ${body}
     try { return JSON.parse(raw); } catch { return {}; }
   }
 
+  function seedParticipantLedger() {
+    return Object.fromEntries(PARTICIPANT_SEED.map((participant) => [participant.id, { ...participant }]));
+  }
+
+  function readParticipantLedger(raw) {
+    const parsed = readHistory(raw);
+    const saved = parsed?.participants && typeof parsed.participants === 'object' ? parsed.participants : parsed;
+    const ledger = seedParticipantLedger();
+    for (const [key, value] of Object.entries(saved || {})) {
+      if (!value || typeof value !== 'object') continue;
+      const id = toNumber(value.id ?? key, null);
+      if (!id) continue;
+      const baseline = ledger[id] || {};
+      ledger[id] = {
+        ...baseline,
+        ...value,
+        id,
+        enrolled: baseline.enrolled === true || value.enrolled === true,
+        attacks: Math.max(toNumber(baseline.attacks), toNumber(value.attacks)),
+        status: baseline.status === 'dropped' || value.status === 'dropped'
+          ? 'dropped'
+          : (value.status || baseline.status || 'active'),
+      };
+    }
+    return ledger;
+  }
+
+  function serializeParticipantLedger(players, existingLedger = {}) {
+    const ledger = readParticipantLedger(existingLedger);
+    const capturedAt = new Date().toISOString();
+    const alliancePositiveCount = players.filter((player) => player.attacks > 0).length;
+    const factionPositiveCounts = new Map();
+    for (const player of players) {
+      if (player.attacks <= 0) continue;
+      factionPositiveCounts.set(player.factionId, (factionPositiveCounts.get(player.factionId) || 0) + 1);
+    }
+    for (const player of players.filter((entry) => entry.enrolled && entry.status !== 'inactive')) {
+      const previous = ledger[player.id] || {};
+      const terminal = previous.status === 'dropped';
+      ledger[player.id] = {
+        ...previous,
+        id: player.id,
+        name: terminal ? previous.name : player.name,
+        factionId: terminal ? previous.factionId : player.factionId,
+        factionName: terminal ? previous.factionName : player.factionName,
+        factionTag: terminal ? previous.factionTag : player.factionTag,
+        teamName: terminal ? previous.teamName : (player.teamName || previous.teamName || ''),
+        teamId: terminal ? (previous.teamId ?? null) : (player.teamId ?? previous.teamId ?? null),
+        attacks: terminal ? toNumber(previous.attacks) : Math.max(toNumber(previous.attacks), toNumber(player.attacks)),
+        score: terminal ? toNumber(previous.score) : Math.max(toNumber(previous.score), toNumber(player.score)),
+        status: terminal || player.status === 'dropped' ? 'dropped' : 'active',
+        enrolled: true,
+        allianceRank: player.allianceRank,
+        factionRank: player.factionRank,
+        teamRank: player.status === 'active' ? player.teamRank : null,
+        zeroRankAlliancePositiveCount: player.status === 'dropped' && player.attacks === 0
+          ? alliancePositiveCount
+          : previous.zeroRankAlliancePositiveCount ?? null,
+        zeroRankFactionPositiveCount: player.status === 'dropped' && player.attacks === 0
+          ? (factionPositiveCounts.get(player.factionId) || 0)
+          : previous.zeroRankFactionPositiveCount ?? null,
+        capturedAt,
+      };
+    }
+    return ledger;
+  }
+
+  function participantLookupPlan(members, ledger, factionIds) {
+    const selected = new Set(factionIds.map(Number));
+    const rosterById = new Map(members.map((member) => [member.id, member]));
+    const knownByFaction = new Map();
+    for (const participant of Object.values(ledger)) {
+      if (!participant?.enrolled || !selected.has(toNumber(participant.factionId))) continue;
+      if (!knownByFaction.has(participant.factionId)) knownByFaction.set(participant.factionId, []);
+      knownByFaction.get(participant.factionId).push(participant);
+    }
+
+    const candidates = [];
+    for (const factionId of selected) {
+      const known = knownByFaction.get(factionId) || [];
+      if (known.length) {
+        for (const participant of known) {
+          const roster = rosterById.get(participant.id);
+          candidates.push(participant.status === 'dropped'
+            ? { ...participant }
+            : { ...participant, ...(roster || {}), enrolled: true });
+        }
+      } else {
+        candidates.push(...members.filter((member) => member.factionId === factionId));
+      }
+    }
+
+    const unique = [...new Map(candidates.map((member) => [member.id, member])).values()];
+    return {
+      frozen: unique.filter((member) => member.enrolled && member.status === 'dropped'),
+      lookups: unique.filter((member) => !(member.enrolled && member.status === 'dropped')),
+    };
+  }
+
+  function frozenParticipantRecord(participant, standings) {
+    return {
+      ...participant,
+      status: 'dropped',
+      enrolled: true,
+      teamRank: null,
+    };
+  }
+
   function serializeHistory(players) {
     return Object.fromEntries(players.map((player) => [player.id, {
       allianceRank: player.allianceRank,
@@ -709,6 +964,7 @@ ${body}
       attacks: player.attacks,
       score: player.score,
       status: player.status,
+      enrolled: player.enrolled,
       capturedAt: new Date().toISOString(),
     }]));
   }
@@ -901,7 +1157,7 @@ ${body}
 
     emitProgress(`Loading ${factionIds.length} faction roster${factionIds.length === 1 ? '' : 's'} and Elimination team standings…`);
     const [standingsPayload, factionPayloads] = await Promise.all([
-      scheduledApiGet('/torn/elimination').catch(() => ({ elimination: [] })),
+      scheduledApiGet('/torn/elimination'),
       Promise.all(factionIds.map(async (id) => {
         const [basic, members] = await Promise.all([
           scheduledApiGet(`/faction/${id}/basic?striptags=true`),
@@ -912,27 +1168,52 @@ ${body}
       })),
     ]);
     const standings = normalizeTeamStandings(standingsPayload);
+    if (!standings.valid) {
+      throw new Error('The Torn /torn/elimination response contained no team standings. Export stopped to prevent false dropout results.');
+    }
     const factions = factionPayloads.map((entry) => entry.faction);
     const members = factionPayloads.flatMap((entry) => entry.members);
     const previousHistory = readHistory(await storageGet(STORAGE.history, {}));
+    const participantLedger = readParticipantLedger(await storageGet(STORAGE.participants, {}));
+    const lookupPlan = participantLookupPlan(members, participantLedger, factionIds);
+    const rankHistory = {
+      ...Object.fromEntries(Object.values(participantLedger).map((participant) => [participant.id, participant])),
+      ...previousHistory,
+    };
 
     phase = 'members';
-    membersTotal = members.length;
+    membersTotal = lookupPlan.lookups.length;
     chunksTotal = Math.ceil(membersTotal / MEMBER_PROGRESS_CHUNK_SIZE);
     apiTotal += membersTotal;
-    emitProgress(`Loading Elimination records for ${membersTotal} member${membersTotal === 1 ? '' : 's'} in ${chunksTotal} progress chunk${chunksTotal === 1 ? '' : 's'}…`);
-    const records = await Promise.all(members.map(async (member) => {
+    emitProgress(`Loading ${membersTotal} active or unresolved participant record${membersTotal === 1 ? '' : 's'} in ${chunksTotal} progress chunk${chunksTotal === 1 ? '' : 's'}; reusing ${lookupPlan.frozen.length} confirmed dropout${lookupPlan.frozen.length === 1 ? '' : 's'} without API calls…`);
+    const normalizedResponses = [];
+    const freshRecords = await Promise.all(lookupPlan.lookups.map(async (member) => {
       const payload = await scheduledApiGet(`/user/${member.id}/competition`);
-      const record = classifyMember(member, normalizeCompetition(payload), previousHistory[member.id], standings);
+      const competition = normalizeCompetition(payload);
+      normalizedResponses.push({ member, competition });
+      const record = classifyMember(member, competition, participantLedger[member.id], standings);
       membersCompleted += 1;
       const currentChunk = Math.min(chunksTotal, Math.max(1, Math.ceil(membersCompleted / MEMBER_PROGRESS_CHUNK_SIZE)));
       emitProgress(`Loaded member ${membersCompleted} of ${membersTotal} — progress chunk ${currentChunk} of ${chunksTotal}.`);
       return record;
     }));
+    const frozenRecords = lookupPlan.frozen.map((participant) => frozenParticipantRecord(participant, standings));
+    const records = [...freshRecords, ...frozenRecords];
+    const previouslyActive = lookupPlan.lookups.filter((member) => participantLedger[member.id]?.status === 'active');
+    const activeStandingsExist = [...standings.byId.values()].some((team) => !team.eliminated);
+    if (
+      previouslyActive.length >= 5
+      && activeStandingsExist
+      && freshRecords.filter((record) => record.status === 'active').length === 0
+      && normalizedResponses.every(({ competition }) => competition.valid && competition.teamId == null)
+    ) {
+      throw new Error('Torn returned no team enrollment for every known active participant. Export stopped instead of incorrectly marking the alliance as dropped out.');
+    }
 
     phase = 'finalizing';
     emitProgress('Calculating alliance, faction, and team rankings…');
-    const players = assignRanks(records.filter((player) => player.status !== 'inactive'), previousHistory);
+    const players = assignRanks(records.filter((player) => player.enrolled && player.status !== 'inactive'), rankHistory);
+    await storageSet(STORAGE.participants, serializeParticipantLedger(players, participantLedger));
     await storageSet(STORAGE.history, serializeHistory(players));
     return { factions, players, generatedAt: new Date().toISOString() };
   }
@@ -1024,7 +1305,11 @@ ${body}
       chunksTotal: null,
     });
     const saved = await storageGet(STORAGE.factionIds, []);
-    const defaults = Array.isArray(saved) && saved.length ? saved : currentId ? [currentId] : [];
+    const defaults = Array.isArray(saved) && saved.length
+      ? saved
+      : DEFAULT_ALLIANCE_FACTION_IDS.includes(currentId)
+        ? DEFAULT_ALLIANCE_FACTION_IDS
+        : currentId ? [currentId] : [];
     const supplied = global.prompt(
       'Faction scope: enter one or more Torn faction IDs separated by commas. Leave the current faction ID alone for a single-faction export; add allied faction IDs for an alliance export.',
       defaults.join(', '),
@@ -1238,10 +1523,14 @@ ${body}
       progressDialog.update({ phase: 'rendering', message: 'Applying the approved styling and formatting…', percent: 99 });
       if (kind === 'discord') {
         const messages = buildDiscordMessages(snapshot);
+        const savedExports = readHistory(await storageGet(STORAGE.exports, {}));
+        await storageSet(STORAGE.exports, { ...savedExports, [kind]: { generatedAt: new Date().toISOString(), payload: messages } });
         progressDialog.completeWithExport(messages);
         setStatus(`${messages.length} Discord message${messages.length === 1 ? '' : 's'} ready to copy.`, 'success');
       } else {
         const html = kind === 'newsletter' ? buildNewsletterHtml(snapshot) : buildLeaderboardHtml(snapshot);
+        const savedExports = readHistory(await storageGet(STORAGE.exports, {}));
+        await storageSet(STORAGE.exports, { ...savedExports, [kind]: { generatedAt: new Date().toISOString(), payload: html } });
         progressDialog.completeWithExport(html);
         setStatus('Torn HTML ready to copy.', 'success');
       }
@@ -1304,6 +1593,9 @@ ${body}
     MAX_CONCURRENT_REQUESTS,
     BUTTON_LABELS,
     TEAM_STYLES,
+    STORAGE,
+    DEFAULT_ALLIANCE_FACTION_IDS,
+    PARTICIPANT_SEED,
     escapeHtml,
     escapeDiscord,
     canonicalTeamName,
@@ -1321,6 +1613,11 @@ ${body}
     buildLeaderboardHtml,
     parseFactionIds,
     readHistory,
+    seedParticipantLedger,
+    readParticipantLedger,
+    serializeParticipantLedger,
+    participantLookupPlan,
+    frozenParticipantRecord,
     serializeHistory,
     roastPlayer,
     packDiscordBlocks,
