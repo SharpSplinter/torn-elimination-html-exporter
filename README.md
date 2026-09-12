@@ -43,10 +43,12 @@ Import the `.user.js` file as a userscript. TornPDA replaces the embedded API-ke
 
 1. Open Torn's Elimination page and select an export button in the fixed **Elimination Update Exports** panel.
 2. Confirm the current faction ID or enter multiple comma-separated faction IDs for an alliance-wide export.
-3. Wait while the script reads member competition records. Requests are deliberately paced in groups of ten.
+3. Wait while the script reads member competition records. A start-time scheduler targets 90 API calls per minute with up to six requests in flight, leaving headroom beneath Torn's 100-calls-per-minute user limit. Setup calls, faction calls, and member calls all use the same limiter.
 4. Paste Torn HTML into the Torn faction newsletter/forum Source Code editor, or paste the numbered Discord messages into Discord in order.
 
 The script stores only the entered faction scope, the desktop API key, and previous rank/team snapshots in userscript-local storage. Previous snapshots provide movement indicators and former-team details for members who drop out between runs.
+
+If Torn returns HTTP 429 or API error 5, the exporter automatically backs off and retries through the same rate-limited queue. Because Torn applies the limit across all keys belonging to a user, other tools using your keys can consume the remaining headroom.
 
 ## Validation
 
