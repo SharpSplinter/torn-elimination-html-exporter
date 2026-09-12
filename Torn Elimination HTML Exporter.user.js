@@ -1,10 +1,14 @@
 // ==UserScript==
 // @name         Torn Elimination HTML Exporter
-// @namespace    https://github.com/SharpSplinter/Torn-Event-Scripts
+// @namespace    https://github.com/SharpSplinter/torn-elimination-html-exporter
 // @version      1.0.0
 // @description  Export styled Torn HTML newsletters and full faction Elimination leaderboards.
 // @author       SharpSplinter
-// @match        https://www.torn.com/*
+// @homepageURL  https://github.com/SharpSplinter/torn-elimination-html-exporter
+// @supportURL   https://github.com/SharpSplinter/torn-elimination-html-exporter/issues
+// @downloadURL  https://raw.githubusercontent.com/SharpSplinter/torn-elimination-html-exporter/main/Torn%20Elimination%20HTML%20Exporter.user.js
+// @updateURL    https://raw.githubusercontent.com/SharpSplinter/torn-elimination-html-exporter/main/Torn%20Elimination%20HTML%20Exporter.user.js
+// @match        https://www.torn.com/page.php?sid=competition*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
