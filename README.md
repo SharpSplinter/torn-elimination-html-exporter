@@ -15,7 +15,7 @@ Both actions copy finished Torn-compatible inline HTML to the clipboard. If clip
 
 ### Desktop
 
-Install the `.user.js` file in Tampermonkey or another compatible userscript manager, visit Torn, and enter a public Torn API key on the first export.
+[Install the userscript directly](https://raw.githubusercontent.com/SharpSplinter/torn-elimination-html-exporter/main/Torn%20Elimination%20HTML%20Exporter.user.js) in Tampermonkey or another compatible userscript manager, open Torn's Elimination page, and enter a public Torn API key on the first export.
 
 ### TornPDA
 
@@ -23,7 +23,7 @@ Import the `.user.js` file as a userscript. TornPDA replaces the embedded API-ke
 
 ## Use
 
-1. Open Torn and select either export button in the fixed **Elimination HTML Exports** panel.
+1. Open Torn's Elimination page and select either export button in the fixed **Elimination HTML Exports** panel.
 2. Confirm the current faction ID or enter multiple comma-separated faction IDs for an alliance-wide export.
 3. Wait while the script reads member competition records. Requests are deliberately paced in groups of ten.
 4. Paste the copied HTML into the Torn faction newsletter or forum editor.
@@ -37,4 +37,3 @@ Run the dependency-free test suite with:
 ```bash
 node --test torn-elimination-html-exporter.test.js
 ```
-
