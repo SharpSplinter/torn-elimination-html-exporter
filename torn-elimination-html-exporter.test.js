@@ -68,7 +68,8 @@ test('standalone userscript exposes three uniquely labelled export actions', () 
 
 test('userscript runs only on the Torn Elimination page', () => {
   const matches = source.match(/^\/\/ @match\s+(.+)$/gm) || [];
-  assert.deepEqual(matches, ['// @match        https://www.torn.com/page.php?sid=competition*']);
+  assert.deepEqual(matches, ['// @match        https://www.torn.com/page.php?sid=elimination*']);
+  assert.doesNotMatch(source, /^\/\/ @match\s+https:\/\/www\.torn\.com\/page\.php\?sid=competition\*/m);
   assert.doesNotMatch(source, /^\/\/ @match\s+https:\/\/www\.torn\.com\/\*$/m);
 });
 
