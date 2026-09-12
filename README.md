@@ -14,6 +14,8 @@ Three export actions:
 
 The Torn actions copy finished Torn-compatible inline HTML to the clipboard. The Discord action copies message 1 immediately and opens a numbered clipboard panel for the remaining messages. If clipboard permission is unavailable, selectable text remains available. The script never downloads an export file.
 
+All three export actions share the same complete data snapshot for up to five minutes. After one API-backed export finishes, the other formats can be generated immediately without repeating faction or member lookups. The cache also survives a page reload, and simultaneous requests share one in-progress lookup. Once the snapshot reaches five minutes old, the next export must collect fresh live data before generating output.
+
 ## Output templates
 
 ### Torn Forum/Newsletter HTML
@@ -46,7 +48,7 @@ Import the `.user.js` file as a userscript. TornPDA replaces the embedded API-ke
 3. Wait while the script reads member competition records. A start-time scheduler targets 90 API calls per minute with up to six requests in flight, leaving headroom beneath Torn's 100-calls-per-minute user limit. Setup calls, faction calls, and member calls all use the same limiter.
 4. Paste Torn HTML into the Torn faction newsletter/forum Source Code editor, or paste the numbered Discord messages into Discord in order.
 
-The script stores only the entered faction scope, the desktop API key, and previous rank/team snapshots in userscript-local storage. Previous snapshots provide movement indicators and former-team details for members who drop out between runs.
+The script stores only the entered faction scope, the desktop API key, previous rank/team snapshots, and the latest five-minute export snapshot in userscript-local storage. Previous snapshots provide movement indicators and former-team details for members who drop out between runs.
 
 If Torn returns HTTP 429 or API error 5, the exporter automatically backs off and retries through the same rate-limited queue. Because Torn applies the limit across all keys belonging to a user, other tools using your keys can consume the remaining headroom.
 
