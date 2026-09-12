@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Elimination HTML Exporter
 // @namespace    https://github.com/SharpSplinter/torn-elimination-html-exporter
-// @version      1.0.0
-// @description  Export styled Torn HTML newsletters and full faction Elimination leaderboards.
+// @version      1.2.0
+// @description  Export styled Torn HTML newsletters, Discord updates, and full faction Elimination leaderboards.
 // @author       SharpSplinter
 // @homepageURL  https://github.com/SharpSplinter/torn-elimination-html-exporter
 // @supportURL   https://github.com/SharpSplinter/torn-elimination-html-exporter/issues
@@ -20,11 +20,12 @@
 (function eliminationHtmlExporter(global) {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.2.0';
   const API_BASE = 'https://api.torn.com/v2';
   const PDA_API_KEY = '###PDA-APIKEY###';
   const BUTTON_LABELS = Object.freeze({
     newsletter: 'Export Torn HTML — Elimination Alliance Update (Top Performers, Team Styling & Dropout Roast)',
+    discord: 'Export Discord Markdown — Elimination Alliance Update (Three Mobile-Safe Messages with Team Icons & Dropout Roast)',
     leaderboard: 'Export Torn HTML — Full Faction Leaderboard (Current Faction; Alliance/Additional Factions Optional)',
   });
   const STORAGE = Object.freeze({
@@ -37,18 +38,18 @@
   const CHUNK_PAUSE_MS = 10000;
 
   const TEAM_STYLES = Object.freeze({
-    'rocket scientists': { name: 'Rocket Scientists', icon: '🚀', color: '#ff9f43' },
-    'brain surgeons': { name: 'Brain Surgeons', icon: '🧠', color: '#56c7f2' },
-    'touching grass': { name: 'Touching Grass', icon: '🌿', color: '#9ac300' },
-    'sticks and stones': { name: 'Sticks and Stones', icon: '🪨', color: '#d4632d' },
-    apex: { name: 'APEX', icon: '🌋', color: '#ef5b55' },
-    reptilians: { name: 'Reptilians', icon: '👁️', color: '#95a76f' },
-    'conspiracy theorists': { name: 'Conspiracy Theorists', icon: '📐', color: '#42b6d0' },
-    'gold dust': { name: 'Gold Dust', icon: '✨', color: '#f2b544' },
-    'loose cannons': { name: 'Loose Cannons', icon: '💣', color: '#9ca8cc' },
-    'high voltage': { name: 'High Voltage', icon: '⚡', color: '#29abe2' },
-    'inanimate objects': { name: 'Inanimate Objects', icon: '🪑', color: '#e1e5e5' },
-    'nine lives': { name: 'Nine Lives', icon: '🐈', color: '#b8bed8' },
+    'rocket scientists': { name: 'Rocket Scientists', badge: 'RS', icon: '🚀', marker: '🟠', color: '#ff9f43' },
+    'brain surgeons': { name: 'Brain Surgeons', badge: 'BS', icon: '🧠', marker: '🔵', color: '#56c7f2' },
+    'touching grass': { name: 'Touching Grass', badge: 'TG', icon: '🌿', marker: '🟢', color: '#9ac300' },
+    'sticks and stones': { name: 'Sticks and Stones', badge: 'SS', icon: '🪨', marker: '🟤', color: '#d4632d' },
+    apex: { name: 'APEX', badge: 'AX', icon: '🌋', marker: '🔴', color: '#ef5b55' },
+    reptilians: { name: 'Reptilians', badge: 'RP', icon: '👁️', marker: '🟢', color: '#95a76f' },
+    'conspiracy theorists': { name: 'Conspiracy Theorists', badge: 'CT', icon: '📐', marker: '🔷', color: '#42b6d0' },
+    'gold dust': { name: 'Gold Dust', badge: 'GD', icon: '✨', marker: '🟡', color: '#f2b544' },
+    'loose cannons': { name: 'Loose Cannons', badge: 'LC', icon: '💣', marker: '🟣', color: '#9ca8cc' },
+    'high voltage': { name: 'High Voltage', badge: 'HV', icon: '⚡', marker: '🔵', color: '#29abe2' },
+    'inanimate objects': { name: 'Inanimate Objects', badge: 'IO', icon: '🪑', marker: '⚪', color: '#e1e5e5' },
+    'nine lives': { name: 'Nine Lives', badge: 'NL', icon: '🐈', marker: '⚪', color: '#b8bed8' },
   });
 
   const KNOWN_FORMER_TEAMS = Object.freeze({
@@ -60,11 +61,11 @@
   });
 
   const SPECIAL_ROASTS = Object.freeze({
-    a1ry: (p) => `${p.name} managed ${p.attacks} attacks and still found the fastest route out of the event. At least that ${movementText(p.movement)} gave the exit some momentum.`,
-    Five: (p) => `${p.name} lived up to the name by contributing roughly five fewer attacks than anyone was hoping for: a flawless zero.`,
-    GORYDAMNREAPER: (p) => `${p.name} brought the intimidating name, left the attacks at zero, and reaped absolutely nothing.`,
-    'Atomic-Toast': (p) => `${p.name} skipped the atomic part and went straight to toast: zero attacks and an early trip home.`,
-    Dscott138: (p) => `${p.name} vanished from the Reptilians so quietly that even the conspiracy board has no attacks to pin on them.`,
+    a1ry: () => 'Climbed 21 places, then apparently kept climbing straight out of Elimination.',
+    Five: () => 'Lived up to the name by delivering roughly five fewer attacks than anyone hoped for: a flawless zero.',
+    GORYDAMNREAPER: () => 'Brought the intimidating name, left the attacks at zero, and reaped absolutely nothing.',
+    'Atomic-Toast': () => 'Skipped the atomic part and went directly to toast: zero attacks and an early trip home.',
+    Dscott138: () => 'Vanished so quietly that even the conspiracy board has no attacks to pin on them.',
   });
 
   function escapeHtml(value) {
@@ -89,7 +90,9 @@
     const key = canonicalTeamName(teamName);
     return TEAM_STYLES[key] || {
       name: String(teamName || 'Team Unknown'),
+      badge: 'TM',
       icon: '🎯',
+      marker: '⚪',
       color: '#d7dce2',
     };
   }
@@ -97,18 +100,20 @@
   function factionStyle(faction, index = 0) {
     const identity = `${faction?.tag || ''} ${faction?.name || ''}`.toLowerCase();
     if (identity.includes('$3xy') || identity.includes('naughty souls')) {
-      return { icon: '💜', color: '#c084fc', background: '#24152f' };
+      return { badge: 'NS', icon: '💜', color: '#c084fc', border: '#a855f7', background: '#24152f' };
     }
     if (identity.includes('nasa') || identity.includes('naughty sanctuary')) {
-      return { icon: '💙', color: '#67c7ff', background: '#102633' };
+      return { badge: 'NA', icon: '💙', color: '#67c7ff', border: '#1f9ed8', background: '#102633' };
     }
     const palette = [
-      { icon: '🧡', color: '#ff9f43', background: '#2c2118' },
-      { icon: '💚', color: '#77d68a', background: '#17281c' },
-      { icon: '💛', color: '#f4d35e', background: '#2b2717' },
-      { icon: '❤️', color: '#ff7675', background: '#2d1919' },
+      { icon: '🟠', color: '#ff9f43', border: '#ff9f43', background: '#2c2118' },
+      { icon: '🟢', color: '#77d68a', border: '#77d68a', background: '#17281c' },
+      { icon: '🟡', color: '#f4d35e', border: '#f4d35e', background: '#2b2717' },
+      { icon: '🔴', color: '#ff7675', border: '#ff7675', background: '#2d1919' },
     ];
-    return palette[index % palette.length];
+    const fallback = palette[index % palette.length];
+    const badgeSource = String(faction?.tag || faction?.name || 'FC').replace(/[^a-z0-9]/gi, '').toUpperCase();
+    return { ...fallback, badge: badgeSource.slice(0, 2) || 'FC' };
   }
 
   function ordinal(value) {
@@ -266,12 +271,25 @@
     return `${tag}${faction.name}`.toUpperCase();
   }
 
-  function statusIcon(player) {
-    if (player.status === 'dropped') return '🔴';
-    if (player.allianceRank <= 3) return ['🥇', '🥈', '🥉'][player.allianceRank - 1];
-    if (player.allianceRank <= 10) return '🟢';
-    if (player.allianceRank <= 15) return '🔵';
-    return '⚪';
+  function escapeDiscord(value) {
+    return String(value ?? '').replace(/([\\`*_[\]~|>])/g, '\\$1');
+  }
+
+  function formatRank(value) {
+    const rank = toNumber(value, null);
+    return rank == null ? '--' : String(rank).padStart(2, '0');
+  }
+
+  function compactBadgeHtml(label, background, color = '#111318') {
+    return `<span style="display:inline-block;box-sizing:border-box;min-width:29px;margin:1px 3px 1px 0;padding:2px 5px;background:${background};color:${color};border-radius:4px;font-size:11px;font-weight:700;line-height:1.35;text-align:center;vertical-align:middle;">${escapeHtml(label)}</span>`;
+  }
+
+  function statusBadgeHtml(player) {
+    if (player.status === 'dropped') return compactBadgeHtml('OUT', '#ff5d73', '#ffffff');
+    if (player.allianceRank <= 3) return compactBadgeHtml(`P${player.allianceRank}`, '#f5a623');
+    if (player.allianceRank <= 10) return compactBadgeHtml('T10', '#35d07f');
+    if (player.allianceRank <= 15) return compactBadgeHtml('T15', '#4da3ff', '#ffffff');
+    return compactBadgeHtml('R', '#c7cbd1');
   }
 
   function movementHtml(player) {
@@ -283,28 +301,26 @@
   function playerRowHtml(player) {
     const team = teamStyle(player.teamName);
     const teamRank = player.teamRank ? ` #${player.teamRank}` : '';
-    const former = player.status === 'dropped' ? 'Former ' : '';
-    return `<div style="margin:8px 0;padding:10px 12px;background:#17191d;border-left:4px solid ${team.color};border-radius:4px;line-height:1.45;">
-  <span style="font-size:18px;">${statusIcon(player)}</span>&nbsp;
-  <a href="https://www.torn.com/profiles.php?XID=${player.id}" style="color:${team.color};font-weight:700;text-decoration:none;">${escapeHtml(player.name)}</a>
-  <span style="color:#f2f3f5;font-weight:700;"> — 🅰 #${player.allianceRank}${movementHtml(player)} &nbsp; 🅵 #${player.factionRank}</span><br>
-  <span style="color:#c7cbd1;">${team.icon} ${former}<span style="color:${team.color};font-weight:700;">${escapeHtml(team.name)}${teamRank}</span> &nbsp;•&nbsp; ⚔️ ${player.attacks.toLocaleString()} attacks</span>
+    const former = player.status === 'dropped' ? 'Formerly ' : '';
+    return `<div style="width:100%;max-width:100%;box-sizing:border-box;margin:8px 0;padding:9px 10px;background:#17191d;border:1px solid #2d3036;border-left:4px solid ${team.color};border-radius:4px;line-height:1.4;overflow:hidden;overflow-wrap:anywhere;word-break:break-word;">
+  <div style="width:100%;max-width:100%;box-sizing:border-box;overflow-wrap:anywhere;word-break:break-word;">${statusBadgeHtml(player)}${compactBadgeHtml(team.badge, team.color)} <a href="https://www.torn.com/profiles.php?XID=${player.id}" style="color:${team.color};font-weight:700;text-decoration:none;overflow-wrap:anywhere;word-break:break-word;">${escapeHtml(player.name)}</a></div>
+  <div style="width:100%;max-width:100%;box-sizing:border-box;margin-top:5px;color:#f2f3f5;font-weight:700;">${compactBadgeHtml(`A#${formatRank(player.allianceRank)}`, '#f5a623')}${movementHtml(player)} ${compactBadgeHtml(`F#${formatRank(player.factionRank)}`, '#4da3ff', '#ffffff')} <span style="white-space:normal;">${player.attacks.toLocaleString()} attacks</span></div>
+  <div style="width:100%;max-width:100%;box-sizing:border-box;margin-top:4px;color:#c7cbd1;overflow-wrap:anywhere;word-break:break-word;">${former}<span style="color:${team.color};font-weight:700;">${escapeHtml(team.name)}${teamRank}</span></div>
 </div>`;
   }
 
   function factionSummary(factionPlayers) {
     const active = factionPlayers.filter((player) => player.status === 'active');
+    const factionName = active[0]?.factionName || 'The faction';
     const topThree = active.filter((player) => player.allianceRank <= 3).length;
     const topTen = active.filter((player) => player.allianceRank <= 10).length;
     const topFifteen = active.filter((player) => player.allianceRank <= 15).length;
-    const clauses = [];
-    if (topThree === 3) clauses.push('a clean sweep of the alliance podium');
-    else if (topThree) clauses.push(`${topThree} podium place${topThree === 1 ? '' : 's'}`);
-    if (topTen) clauses.push(`${topTen} place${topTen === 1 ? '' : 's'} in the alliance top ten`);
-    if (topFifteen > topTen) clauses.push(`${topFifteen - topTen} more inside the top fifteen`);
-    return clauses.length
-      ? `The faction currently holds ${clauses.join(', including ')}.`
-      : 'The faction is still hunting for its first alliance top-fifteen position.';
+    const sentences = [];
+    if (topThree === 3) sentences.push(`${factionName} owns a clean sweep of the alliance podium.`);
+    else if (topThree) sentences.push(`${factionName} holds ${topThree} alliance podium place${topThree === 1 ? '' : 's'}.`);
+    if (topTen) sentences.push(`${topTen} member${topTen === 1 ? '' : 's'} currently sit inside the alliance top ten.`);
+    if (topFifteen > topTen) sentences.push(`${topFifteen - topTen} more hold places inside the top fifteen.`);
+    return sentences.length ? sentences.join(' ') : `${factionName} is still hunting for its first alliance top-fifteen position.`;
   }
 
   function roastPlayer(player) {
@@ -315,27 +331,41 @@
   }
 
   function headerBlock(title, subtitle) {
-    return `<div style="text-align:center;font-weight:700;">
-  <div style="font-size:28px;color:#ffffff;letter-spacing:.4px;margin-bottom:8px;">${escapeHtml(title)}</div>
-  <div style="font-size:14px;color:#c7cbd1;margin-bottom:5px;">${subtitle}</div>
-  <div style="font-size:14px;color:#c7cbd1;">🅰 <span style="color:#ffffff;">Alliance Rank</span> &nbsp;•&nbsp; 🅵 <span style="color:#ffffff;">Faction Rank</span></div>
+    return `<div style="width:100%;max-width:100%;box-sizing:border-box;text-align:center;font-weight:700;overflow:hidden;">
+  <div style="width:100%;max-width:100%;box-sizing:border-box;font-size:24px;line-height:1.2;color:#ffffff;letter-spacing:.3px;margin-bottom:10px;overflow-wrap:anywhere;word-break:break-word;">${compactBadgeHtml('E', '#f5a623')} ${escapeHtml(title)}</div>
+  <div style="width:100%;max-width:100%;box-sizing:border-box;font-size:12px;line-height:1.65;color:#c7cbd1;margin-bottom:5px;">${subtitle}</div>
+  <div style="width:100%;max-width:100%;box-sizing:border-box;font-size:12px;line-height:1.65;color:#c7cbd1;">${compactBadgeHtml('A', '#f5a623')} <span style="color:#ffffff;">Alliance Rank</span> &nbsp; ${compactBadgeHtml('F', '#4da3ff', '#ffffff')} <span style="color:#ffffff;">Faction Rank</span></div>
 </div>`;
   }
 
   function factionHeaderHtml(faction, index) {
     const style = factionStyle(faction, index);
-    return `<div style="margin:24px 0 12px;padding:12px;text-align:center;font-size:20px;font-weight:700;color:${style.color};background:${style.background};border:1px solid ${style.color};border-radius:5px;">${style.icon} ${escapeHtml(factionTitle(faction))}</div>`;
+    return `<div style="width:100%;max-width:100%;box-sizing:border-box;margin:22px 0 12px;padding:10px 8px;text-align:center;font-size:18px;line-height:1.35;font-weight:700;color:${style.color};background:${style.background};border:1px solid ${style.border};border-left:5px solid ${style.border};border-radius:5px;overflow:hidden;overflow-wrap:anywhere;word-break:break-word;">${compactBadgeHtml(style.badge, style.color)} ${escapeHtml(factionTitle(faction))}</div>`;
   }
 
-  function sectionHeaderHtml(icon, label, color) {
-    return `<div style="margin:18px 0 10px;text-align:center;font-size:17px;font-weight:700;color:${color};">${icon} ${escapeHtml(label)}</div>`;
+  function sectionHeaderHtml(badge, label, color) {
+    const textColor = color === '#4da3ff' || color === '#ff5d73' ? '#ffffff' : '#111318';
+    return `<div style="width:100%;max-width:100%;box-sizing:border-box;margin:18px 0 10px;text-align:center;font-size:16px;line-height:1.35;font-weight:700;color:${color};overflow-wrap:anywhere;word-break:break-word;">${compactBadgeHtml(badge, color, textColor)} ${escapeHtml(label)}</div>`;
   }
 
   function documentShell(body) {
     return `<!-- Torn Elimination HTML Exporter v${VERSION} -->
-<div style="max-width:600px;margin:0 auto;padding:22px;background:#202225;color:#f2f3f5;font-family:Arial,Helvetica,sans-serif;border:1px solid #34373c;border-radius:7px;box-sizing:border-box;">
+<div style="width:100%;max-width:601px;box-sizing:border-box;margin:0 auto;padding:0 2px;overflow:hidden;">
+<div style="width:100%;max-width:100%;box-sizing:border-box;margin:0;padding:14px 12px;background:#202225;color:#f2f3f5;font-family:Arial,Helvetica,sans-serif;border:1px solid #34373c;border-radius:7px;overflow:hidden;overflow-wrap:anywhere;word-break:break-word;">
 ${body}
+</div>
 </div>`;
+  }
+
+  function newsletterLegendHtml(includeFullField = false) {
+    const parts = [
+      `${compactBadgeHtml('P', '#f5a623')} <span style="color:#ffd166;">Podium</span>`,
+      `${compactBadgeHtml('T10', '#35d07f')} <span style="color:#35d07f;">Top 10</span>`,
+      `${compactBadgeHtml('T15', '#4da3ff', '#ffffff')} <span style="color:#4da3ff;">Top 15</span>`,
+    ];
+    if (includeFullField) parts.push(`${compactBadgeHtml('ALL', '#c7cbd1')} <span style="color:#d7dce2;">Full Field</span>`);
+    parts.push(`${compactBadgeHtml('OUT', '#ff5d73', '#ffffff')} <span style="color:#ff5d73;">Dropped Out</span>`);
+    return parts.join(' &nbsp; ');
   }
 
   function buildNewsletterHtml(snapshot) {
@@ -343,12 +373,7 @@ ${body}
     const factions = snapshot.factions || [];
     const activeTop = players.filter((player) => player.status === 'active' && player.allianceRank <= 15);
     const dropped = players.filter((player) => player.status === 'dropped');
-    const parts = [
-      headerBlock(
-        '🏆 ELIMINATION ALLIANCE UPDATE',
-        '🥇🥈🥉 <span style="color:#ffd166;">Podium</span> &nbsp;•&nbsp; 🟢 <span style="color:#35d07f;">Top 10</span> &nbsp;•&nbsp; 🔵 <span style="color:#4da3ff;">Top 15</span> &nbsp;•&nbsp; 🔴 <span style="color:#ff5d73;">Dropped Out</span>',
-      ),
-    ];
+    const parts = [headerBlock('ELIMINATION ALLIANCE UPDATE', newsletterLegendHtml())];
 
     factions.forEach((faction, index) => {
       const group = activeTop.filter((player) => player.factionId === faction.id);
@@ -358,46 +383,41 @@ ${body}
       const topTen = group.filter((player) => player.allianceRank > 3 && player.allianceRank <= 10);
       const topFifteen = group.filter((player) => player.allianceRank > 10 && player.allianceRank <= 15);
       if (podium.length) {
-        parts.push(sectionHeaderHtml('🥇🥈🥉', 'PODIUM', '#ffd166'));
+        parts.push(sectionHeaderHtml('P', 'PODIUM', '#ffd166'));
         parts.push(...podium.map(playerRowHtml));
       }
       if (topTen.length) {
-        parts.push(sectionHeaderHtml('🟢', 'ALLIANCE TOP 10', '#35d07f'));
+        parts.push(sectionHeaderHtml('T10', 'ALLIANCE TOP 10', '#35d07f'));
         parts.push(...topTen.map(playerRowHtml));
       }
       if (topFifteen.length) {
-        parts.push(sectionHeaderHtml('🔵', 'ALLIANCE TOP 15', '#4da3ff'));
+        parts.push(sectionHeaderHtml('T15', 'ALLIANCE TOP 15', '#4da3ff'));
         parts.push(...topFifteen.map(playerRowHtml));
       }
-      parts.push(`<div style="margin:14px 4px 0;color:#d7d9dd;line-height:1.55;">${escapeHtml(factionSummary(group))}</div>`);
+      parts.push(`<div style="width:100%;max-width:100%;box-sizing:border-box;margin:14px 0 0;color:#d7d9dd;line-height:1.55;overflow-wrap:anywhere;word-break:break-word;">${escapeHtml(factionSummary(group))}</div>`);
     });
 
     if (dropped.length) {
-      parts.push('<div style="margin:28px 0 8px;padding:13px;text-align:center;font-size:22px;font-weight:700;color:#ff5d73;background:#31191f;border:1px solid #ff5d73;border-radius:5px;">🔴 DROPPED OUT — WALL OF SHAME 🔴</div>');
+      parts.push(`<div style="width:100%;max-width:100%;box-sizing:border-box;margin:28px 0 8px;padding:11px 8px;text-align:center;font-size:20px;line-height:1.35;font-weight:700;color:#ff5d73;background:#31191f;border:1px solid #ff5d73;border-radius:5px;overflow:hidden;overflow-wrap:anywhere;word-break:break-word;">${compactBadgeHtml('OUT', '#ff5d73', '#ffffff')} DROPPED OUT - WALL OF SHAME</div>`);
       factions.forEach((faction, index) => {
         const group = dropped.filter((player) => player.factionId === faction.id);
         if (!group.length) return;
         parts.push(factionHeaderHtml(faction, index));
         for (const player of group) {
           parts.push(playerRowHtml(player));
-          parts.push(`<div style="margin:-2px 8px 13px;color:#ffadb8;font-style:italic;line-height:1.5;">🔥 ${escapeHtml(roastPlayer(player))}</div>`);
+          parts.push(`<div style="width:100%;max-width:100%;box-sizing:border-box;margin:-2px 0 13px;padding:0 8px;color:#ffadb8;font-style:italic;line-height:1.5;overflow-wrap:anywhere;word-break:break-word;"><span style="font-weight:700;">CALL-OUT:</span> ${escapeHtml(roastPlayer(player))}</div>`);
         }
       });
     }
 
-    parts.push('<div style="margin-top:25px;text-align:center;font-weight:700;color:#9ca3ad;">Keep swinging, keep climbing—and if you drop out, at least give the newsletter something funny to write.</div>');
+    parts.push('<div style="width:100%;max-width:100%;box-sizing:border-box;margin-top:25px;text-align:center;font-weight:700;color:#9ca3ad;overflow-wrap:anywhere;word-break:break-word;">Keep swinging, keep climbing - and if you drop out, at least give the newsletter something funny to write.</div>');
     return documentShell(parts.join('\n'));
   }
 
   function buildLeaderboardHtml(snapshot) {
     const players = snapshot.players || [];
     const factions = snapshot.factions || [];
-    const parts = [
-      headerBlock(
-        '🏆 FULL ELIMINATION LEADERBOARD',
-        '🥇🥈🥉 <span style="color:#ffd166;">Podium</span> &nbsp;•&nbsp; 🟢 <span style="color:#35d07f;">Top 10</span> &nbsp;•&nbsp; 🔵 <span style="color:#4da3ff;">Top 15</span> &nbsp;•&nbsp; ⚪ <span style="color:#d7dce2;">Full Field</span> &nbsp;•&nbsp; 🔴 <span style="color:#ff5d73;">Dropped Out</span>',
-      ),
-    ];
+    const parts = [headerBlock('FULL ELIMINATION LEADERBOARD', newsletterLegendHtml(true))];
 
     factions.forEach((faction, index) => {
       const group = players
@@ -405,16 +425,124 @@ ${body}
         .sort((a, b) => a.factionRank - b.factionRank);
       if (!group.length) return;
       parts.push(factionHeaderHtml(faction, index));
-      parts.push(sectionHeaderHtml('📊', `${group.length} ELIMINATION PARTICIPANTS`, '#ffffff'));
+      parts.push(sectionHeaderHtml('ALL', `${group.length} ELIMINATION PARTICIPANTS`, '#ffffff'));
       parts.push(...group.map(playerRowHtml));
       const attacks = group.reduce((total, player) => total + player.attacks, 0);
       const active = group.filter((player) => player.status === 'active').length;
       const dropped = group.filter((player) => player.status === 'dropped').length;
-      parts.push(`<div style="margin:14px 4px 0;text-align:center;font-weight:700;color:#c7cbd1;">${active} active &nbsp;•&nbsp; ${dropped} dropped &nbsp;•&nbsp; ${attacks.toLocaleString()} total attacks</div>`);
+      parts.push(`<div style="width:100%;max-width:100%;box-sizing:border-box;margin:14px 0 0;text-align:center;font-weight:700;color:#c7cbd1;overflow-wrap:anywhere;word-break:break-word;">${active} active &nbsp;&bull;&nbsp; ${dropped} dropped &nbsp;&bull;&nbsp; ${attacks.toLocaleString()} total attacks</div>`);
     });
 
-    parts.push('<div style="margin-top:25px;text-align:center;font-weight:700;color:#9ca3ad;">Generated from current Torn Elimination competition data.</div>');
+    parts.push('<div style="width:100%;max-width:100%;box-sizing:border-box;margin-top:25px;text-align:center;font-weight:700;color:#9ca3ad;overflow-wrap:anywhere;word-break:break-word;">Generated from current Torn Elimination competition data.</div>');
     return documentShell(parts.join('\n'));
+  }
+
+  function discordMovement(player) {
+    if (player.movement > 0) return ` 🟢 **▲${player.movement}**`;
+    if (player.movement < 0) return ` 🔻 **▼${Math.abs(player.movement)}**`;
+    return '';
+  }
+
+  function discordProfileLink(player) {
+    return `**[${escapeDiscord(player.name)}](<https://www.torn.com/profiles.php?XID=${player.id}>)**`;
+  }
+
+  function discordPlacementIcon(player) {
+    if (player.allianceRank === 1) return '🥇 ';
+    if (player.allianceRank === 2) return '🥈 ';
+    if (player.allianceRank === 3) return '🥉 ';
+    return '';
+  }
+
+  function discordPlayerCard(player, includeRoast = false) {
+    const team = teamStyle(player.teamName);
+    const teamRank = player.teamRank ? ` #${player.teamRank}` : '';
+    const former = player.status === 'dropped' ? 'Formerly ' : '';
+    const lines = [
+      `> ${discordPlacementIcon(player)}${team.marker} ${discordProfileLink(player)} — 🟧 **A#${formatRank(player.allianceRank)}**${discordMovement(player)} • 🟦 **F#${formatRank(player.factionRank)}**`,
+      `> -# ${team.icon} ${former}${escapeDiscord(team.name)}${teamRank} • ${player.attacks.toLocaleString()} attacks`,
+    ];
+    if (includeRoast) lines.push(`> *${escapeDiscord(roastPlayer(player))}*`);
+    return lines.join('\n');
+  }
+
+  function discordFactionHeader(faction, index, continued = false) {
+    const style = factionStyle(faction, index);
+    return `## ${style.icon} ${escapeDiscord(factionTitle(faction))}${continued ? ' — CONTINUED' : ''}`;
+  }
+
+  function discordRankSections(group, sections = ['podium', 'topTen', 'topFifteen']) {
+    const definitions = {
+      podium: { heading: '### 🥇🥈🥉 PODIUM', players: group.filter((player) => player.allianceRank <= 3) },
+      topTen: { heading: '### 🟢 ALLIANCE TOP 10', players: group.filter((player) => player.allianceRank > 3 && player.allianceRank <= 10) },
+      topFifteen: { heading: '### 🔵 ALLIANCE TOP 15', players: group.filter((player) => player.allianceRank > 10 && player.allianceRank <= 15) },
+    };
+    return sections.flatMap((key) => {
+      const section = definitions[key];
+      return section.players.length ? [section.heading, ...section.players.map((player) => discordPlayerCard(player))] : [];
+    });
+  }
+
+  function packDiscordBlocks(blocks, limit = 1950) {
+    const messages = [];
+    let current = '';
+    for (const block of blocks.filter(Boolean)) {
+      const candidate = current ? `${current}\n\n${block}` : block;
+      if (candidate.length <= limit || !current) {
+        current = candidate;
+      } else {
+        messages.push(current);
+        current = block;
+      }
+    }
+    if (current) messages.push(current);
+    return messages;
+  }
+
+  function buildDiscordMessages(snapshot) {
+    const players = snapshot.players || [];
+    const factions = snapshot.factions || [];
+    const activeTop = players.filter((player) => player.status === 'active' && player.allianceRank <= 15);
+    const activeFactions = factions
+      .map((faction, index) => ({ faction, index, group: activeTop.filter((player) => player.factionId === faction.id) }))
+      .filter((entry) => entry.group.length);
+    const globalHeader = '# 🏆 ELIMINATION ALLIANCE UPDATE\n-# 🥇🥈🥉 Podium • 🟢 Alliance Top 10 • 🔵 Alliance Top 15 • 🔴 Dropped Out\n-# 🟧 A = Alliance Rank • 🟦 F = Faction Rank • ▲ / ▼ = Movement';
+    const messages = [];
+
+    if (activeFactions.length) {
+      const [first, ...remaining] = activeFactions;
+      const opening = [globalHeader, discordFactionHeader(first.faction, first.index), ...discordRankSections(first.group, ['podium', 'topTen'])];
+      messages.push(...packDiscordBlocks(opening));
+
+      const continuation = [
+        discordFactionHeader(first.faction, first.index, true),
+        ...discordRankSections(first.group, ['topFifteen']),
+        `**${escapeDiscord(first.faction.name.toUpperCase())} SNAPSHOT:** ${escapeDiscord(factionSummary(first.group))}`,
+      ];
+      for (const entry of remaining) {
+        continuation.push(
+          discordFactionHeader(entry.faction, entry.index),
+          ...discordRankSections(entry.group),
+          `**${escapeDiscord(entry.faction.name.toUpperCase())} SNAPSHOT:** ${escapeDiscord(factionSummary(entry.group))}`,
+        );
+      }
+      messages.push(...packDiscordBlocks(continuation));
+    } else {
+      messages.push(`${globalHeader}\n\n_No active top-fifteen participants were found for the selected faction scope._`);
+    }
+
+    const dropped = players.filter((player) => player.status === 'dropped');
+    if (dropped.length) {
+      const dropoutBlocks = ['# 🔴 DROPPED OUT\n-# WALL OF SHAME • Game-performance roast edition'];
+      factions.forEach((faction, index) => {
+        const group = dropped.filter((player) => player.factionId === faction.id);
+        if (!group.length) return;
+        dropoutBlocks.push(discordFactionHeader(faction, index), ...group.map((player) => discordPlayerCard(player, true)));
+      });
+      messages.push(...packDiscordBlocks(dropoutBlocks));
+    }
+
+    return messages;
   }
 
   function parseFactionIds(value, currentFactionId) {
@@ -621,6 +749,38 @@ ${body}
     return copied;
   }
 
+  function showDiscordMessages(messages) {
+    global.document.getElementById('tehe-discord-messages')?.remove();
+    const overlay = global.document.createElement('div');
+    overlay.id = 'tehe-discord-messages';
+    const sections = messages.map((message, index) => `<section style="margin:10px 0;padding:10px;background:#17191d;border:1px solid #45484f;border-radius:6px;">
+  <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:7px;"><strong>Discord message ${index + 1} of ${messages.length}</strong><button type="button" data-copy-message="${index}" style="padding:6px 9px;cursor:pointer;">Copy message ${index + 1}</button></div>
+  <textarea readonly style="display:block;width:100%;height:150px;box-sizing:border-box;resize:vertical;background:#0f1012;color:#eee;border:1px solid #555;padding:8px;white-space:pre-wrap;">${escapeHtml(message)}</textarea>
+</section>`).join('');
+    overlay.innerHTML = `<div style="width:min(94vw,760px);max-height:90vh;box-sizing:border-box;overflow:auto;background:#202225;border:1px solid #555;border-radius:8px;padding:14px;color:#fff;box-shadow:0 12px 40px #000;">
+  <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;"><strong>Discord Elimination Update</strong><button type="button" data-close-discord style="padding:6px 10px;cursor:pointer;">Close</button></div>
+  <div style="margin-top:6px;color:#c7cbd1;font-size:12px;">Paste each message into Discord in numbered order. Message 1 was copied automatically when clipboard access was available.</div>
+  ${sections}
+</div>`;
+    Object.assign(overlay.style, { position: 'fixed', inset: '0', zIndex: '2147483647', background: '#000b', display: 'grid', placeItems: 'center' });
+    overlay.querySelector('[data-close-discord]').addEventListener('click', () => overlay.remove());
+    overlay.querySelectorAll('[data-copy-message]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const index = Number(button.dataset.copyMessage);
+        const copied = await copyText(messages[index]);
+        button.textContent = copied ? `Copied message ${index + 1}` : `Select message ${index + 1} below`;
+        if (!copied) button.closest('section').querySelector('textarea').select();
+      });
+    });
+    global.document.body.appendChild(overlay);
+  }
+
+  async function deliverDiscord(messages) {
+    const copied = await copyText(messages[0] || '');
+    showDiscordMessages(messages);
+    return copied;
+  }
+
   function setStatus(message, tone = 'normal') {
     const element = global.document?.getElementById('tehe-export-status');
     if (!element) return;
@@ -635,9 +795,15 @@ ${body}
       const apiKey = await resolveApiKey();
       const factionIds = await resolveFactionScope(apiKey);
       const snapshot = await collectSnapshot(apiKey, factionIds, (message) => setStatus(message));
-      const html = kind === 'newsletter' ? buildNewsletterHtml(snapshot) : buildLeaderboardHtml(snapshot);
-      const copied = await deliverHtml(html);
-      setStatus(copied ? 'Copied Torn HTML to the clipboard.' : 'Clipboard access was unavailable; use the open copy box.', copied ? 'success' : 'normal');
+      if (kind === 'discord') {
+        const messages = buildDiscordMessages(snapshot);
+        const copied = await deliverDiscord(messages);
+        setStatus(copied ? `Copied Discord message 1 of ${messages.length}; use the open panel for the rest.` : 'Use the open panel to copy each Discord message.', copied ? 'success' : 'normal');
+      } else {
+        const html = kind === 'newsletter' ? buildNewsletterHtml(snapshot) : buildLeaderboardHtml(snapshot);
+        const copied = await deliverHtml(html);
+        setStatus(copied ? 'Copied Torn HTML to the clipboard.' : 'Clipboard access was unavailable; use the open copy box.', copied ? 'success' : 'normal');
+      }
     } catch (error) {
       setStatus(error?.message || 'Export failed.', error?.message === 'Export cancelled.' ? 'normal' : 'error');
     } finally {
@@ -649,7 +815,7 @@ ${body}
     if (!global.document?.body || global.document.getElementById('tehe-export-panel')) return;
     const panel = global.document.createElement('section');
     panel.id = 'tehe-export-panel';
-    panel.setAttribute('aria-label', 'Elimination HTML exports');
+    panel.setAttribute('aria-label', 'Elimination exports');
     panel.innerHTML = `<style>
   #tehe-export-panel{position:fixed;right:14px;bottom:14px;z-index:999999;width:min(360px,calc(100vw - 28px));box-sizing:border-box;padding:12px;background:#202225ee;border:1px solid #45484f;border-radius:9px;box-shadow:0 8px 28px #0009;font:13px Arial,sans-serif;color:#f2f3f5}
   #tehe-export-panel .tehe-title{text-align:center;font-weight:700;margin:0 0 8px;color:#fff}
@@ -659,8 +825,9 @@ ${body}
   #tehe-export-status{min-height:16px;margin-top:7px;text-align:center;font-size:12px;color:#c7cbd1}
   @media(max-width:520px){#tehe-export-panel{right:8px;bottom:8px;width:calc(100vw - 16px)}#tehe-export-panel button{font-size:12px}}
 </style>
-<div class="tehe-title">Elimination HTML Exports</div>
+<div class="tehe-title">Elimination Update Exports</div>
 <button type="button" data-export="newsletter">${escapeHtml(BUTTON_LABELS.newsletter)}</button>
+<button type="button" data-export="discord">${escapeHtml(BUTTON_LABELS.discord)}</button>
 <button type="button" data-export="leaderboard">${escapeHtml(BUTTON_LABELS.leaderboard)}</button>
 <div id="tehe-export-status" role="status">Ready.</div>`;
     const buttons = [...panel.querySelectorAll('button[data-export]')];
@@ -679,6 +846,7 @@ ${body}
     BUTTON_LABELS,
     TEAM_STYLES,
     escapeHtml,
+    escapeDiscord,
     canonicalTeamName,
     teamStyle,
     factionStyle,
@@ -690,11 +858,13 @@ ${body}
     assignRanks,
     classifyMember,
     buildNewsletterHtml,
+    buildDiscordMessages,
     buildLeaderboardHtml,
     parseFactionIds,
     readHistory,
     serializeHistory,
     roastPlayer,
+    packDiscordBlocks,
     pacedMap,
   });
 
