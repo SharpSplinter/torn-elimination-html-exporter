@@ -57,14 +57,16 @@ const fixture = {
   ],
 };
 
-test('standalone userscript exposes three uniquely labelled export actions', () => {
-  assert.equal(exporter.VERSION, '1.8.0');
-  assert.equal(exporter.STORAGE.snapshot, 'tehe.snapshotCache.v4');
+test('standalone userscript exposes four uniquely labelled export actions', () => {
+  assert.equal(exporter.VERSION, '1.9.0');
+  assert.equal(exporter.STORAGE.snapshot, 'tehe.snapshotCache.v5');
   assert.equal(exporter.STORAGE.participants, 'tehe.participantLedger.v2');
-  assert.deepEqual(Object.keys(exporter.BUTTON_LABELS), ['newsletter', 'discord', 'leaderboard']);
+  assert.equal(exporter.STORAGE.masterIndex, 'tehe.masterEliminationIndex.v1');
+  assert.deepEqual(Object.keys(exporter.BUTTON_LABELS), ['newsletter', 'discord', 'leaderboard', 'master']);
   assert.match(exporter.BUTTON_LABELS.newsletter, /Elimination Alliance Update/);
   assert.match(exporter.BUTTON_LABELS.discord, /Discord Markdown/);
-  assert.match(exporter.BUTTON_LABELS.leaderboard, /Export JSON File.*Full Faction Elimination Rankings/);
+  assert.match(exporter.BUTTON_LABELS.leaderboard, /Complete Current Faction Rosters.*No Members Omitted/);
+  assert.match(exporter.BUTTON_LABELS.master, /Master Elimination JSON.*Entire Persistent Index/);
   assert.notEqual(exporter.BUTTON_LABELS.newsletter, exporter.BUTTON_LABELS.leaderboard);
   assert.notEqual(exporter.BUTTON_LABELS.newsletter, exporter.BUTTON_LABELS.discord);
 });
@@ -100,6 +102,9 @@ test('authoritative rankings snapshot imports only active participants and confi
     ['Active', 'active'],
     ['Dropped', 'dropped'],
   ]);
+  assert.deepEqual(snapshot.rosterMembers.map((entry) => [entry.name, entry.status]), [
+    ['Active', 'active'], ['Dropped', 'dropped'], ['Never Enrolled', 'not_participating'],
+  ]);
   assert.equal(snapshot.players[1].formerTeamName, 'APEX');
   assert.equal(refreshRequests, 0);
 });
@@ -117,7 +122,14 @@ test('five-minute snapshot cache reuses completed data and deduplicates an in-pr
     fetchSnapshot: async () => {
       fetches += 1;
       await new Promise((resolve) => { releaseFetch = resolve; });
-      return { factions: [{ id: 1 }], players: [{ id: 2 }], generatedAt: 'test' };
+      return {
+        factions: [{ id: 1 }],
+        players: [{ id: 2 }],
+        rosterMembers: [{ id: 2 }],
+        teams: [{ id: 1 }],
+        masterIndex: { 2: { id: 2 } },
+        generatedAt: 'test',
+      };
     },
   });
 
@@ -177,7 +189,9 @@ test('export controls are compact inline buttons beside the Elimination heading'
   assert.match(source, />HTML Export<\/button>/);
   assert.match(source, />Discord Export<\/button>/);
   assert.match(source, />Full Faction Export<\/button>/);
-  assert.match(source, /#tehe-export-controls\{display:inline-flex/);
+  assert.match(source, />Master Elim Export<\/button>/);
+  assert.match(source, /panel\.setAttribute\('style', 'display:inline-flex/);
+  assert.doesNotMatch(source, /panel\.innerHTML = `<style>/);
   assert.doesNotMatch(source, /#tehe-export-panel\{position:fixed/);
 });
 
@@ -189,7 +203,7 @@ test('each export opens detailed progress first and requires an explicit complet
   assert.match(source, /Members: discovering/);
   assert.match(source, /Chunks: discovering/);
   assert.match(source, /MEMBER_PROGRESS_CHUNK_SIZE = 10/);
-  assert.match(source, /kind === 'leaderboard' \? 'Download JSON File' : 'Copy to Clipboard'/);
+  assert.match(source, /jsonExport \? 'Download JSON File' : 'Copy to Clipboard'/);
   assert.match(source, /Export ready\. Nothing has been copied yet\./);
   assert.match(source, /picker\.addEventListener\('change', displaySelectedExport\)/);
   assert.match(source, /actionButton\.addEventListener\('click', async \(\) =>/);
@@ -273,20 +287,26 @@ test('Discord export mirrors the approved native Markdown layout in mobile-safe 
   assert.doesNotMatch(markdown, /```ansi|\u001b\[/i);
 });
 
-test('full faction JSON contains all active and dropped participants grouped by faction', () => {
-  const json = exporter.buildFactionJson({ ...fixture, eventKey: '2026:1,2', scope: '8317:44817' });
+test('full faction JSON contains every current roster member and separates nonparticipants', () => {
+  const rosterMembers = [
+    ...fixture.players,
+    player({ id: 7001, name: 'NeverEnrolledNS', status: 'not_participating', teamName: '', attacks: 0 }),
+    player({ id: 7002, name: 'NeverEnrolledNA', factionId: 200, factionName: 'Naughty Sanctuary', factionTag: 'NaSa', status: 'not_participating', teamName: '', attacks: 0 }),
+  ];
+  const json = exporter.buildFactionJson({ ...fixture, rosterMembers, eventKey: '2026:1,2', scope: '8317:44817' });
   const payload = JSON.parse(json);
-  assert.equal(payload.schemaVersion, 1);
-  assert.equal(payload.exportType, 'torn-elimination-full-faction-rankings');
-  assert.equal(payload.exporterVersion, '1.8.0');
+  assert.equal(payload.schemaVersion, 2);
+  assert.equal(payload.exportType, 'torn-elimination-full-faction-rosters');
+  assert.equal(payload.exporterVersion, '1.9.0');
   assert.equal(payload.summary.factionCount, 2);
+  assert.equal(payload.summary.memberCount, 22);
   assert.equal(payload.summary.participantCount, 20);
   assert.equal(payload.summary.activeCount, 15);
   assert.equal(payload.summary.droppedOutCount, 5);
-  assert.deepEqual(payload.factions.map((faction) => faction.participantCount), [16, 4]);
-  assert.equal(payload.factions[0].participants[0].name, 'SuperSheepie');
-  assert.equal(payload.factions[0].participants.at(-1).name, 'GORYDAMNREAPER');
-  assert.equal(payload.factions[1].participants.some((entry) => entry.name === 'Atomic-Toast'), true);
+  assert.equal(payload.summary.notParticipatingCount, 2);
+  assert.deepEqual(payload.factions.map((faction) => faction.memberCount), [17, 5]);
+  assert.equal(payload.factions[0].members.some((entry) => entry.name === 'NeverEnrolledNS' && entry.status === 'not_participating'), true);
+  assert.equal(payload.factions[1].members.some((entry) => entry.name === 'Atomic-Toast' && entry.status === 'dropped'), true);
   assert.equal(json.includes('<div'), false);
   assert.match(exporter.factionJsonFilename(fixture, new Date('2026-09-12T12:34:56.000Z')),
     /^torn-elimination-3xy-NaSa-2026-09-12T12-34-56-000Z\.json$/);
@@ -308,28 +328,28 @@ test('rank assignment is deterministic and calculates faction, team and movement
 });
 
 test('classification admits only confirmed participants, preserves scores, and makes dropout terminal', () => {
-  const standings = exporter.normalizeTeamStandings({ elimination: { teams: [{ id: 5, name: 'APEX', score: 999, position: 1, eliminated: false }, { id: 6, name: 'Loose Cannons', eliminated: true }] } });
+  const standings = exporter.normalizeTeamStandings({ elimination: { teams: [{ id: 5, name: 'APEX', score: 999, lives: 4, position: 1, eliminated: false }, { id: 6, name: 'Loose Cannons', lives: 0, eliminated: false }] } });
   const active = exporter.classifyMember(
     { id: 8, name: 'Active', factionId: 100 },
-    { valid: true, name: 'Elimination', score: 20, attacks: 3, teamName: 'APEX', teamId: 5 },
+    exporter.normalizeCompetition({ competition: { Competition: 'Elimination', Team: 'APEX', Attacks: 3, team_id: null, Score: 20 } }),
     { enrolled: true, status: 'active', attacks: 10, score: 25, teamName: 'APEX' },
     standings,
   );
   const nonparticipant = exporter.classifyMember(
     { id: 9, name: 'Never Enrolled', factionId: 100 },
-    { valid: true, name: 'Elimination', score: 0, attacks: 0, teamName: '', teamId: null },
+    exporter.normalizeCompetition({ competition: { Competition: 'Elimination', Team: 'Unknown', Attacks: 0, team_id: null } }),
     null,
     standings,
   );
   const defeated = exporter.classifyMember(
     { id: 10, name: 'Defeated', factionId: 100 },
-    { valid: true, name: 'Elimination', score: 10, attacks: 4, teamName: 'Loose Cannons', teamId: 6 },
+    exporter.normalizeCompetition({ competition: { Competition: 'Elimination', Team: 'Unknown', Attacks: 4, team_id: null } }),
     { enrolled: true, status: 'active', attacks: 7, teamName: 'Loose Cannons' },
     standings,
   );
   const terminal = exporter.classifyMember(
     { id: 11, name: 'Terminal', factionId: 100 },
-    { valid: true, name: 'Elimination', score: 99, attacks: 99, teamName: 'APEX', teamId: 5 },
+    exporter.normalizeCompetition({ competition: { Competition: 'Elimination', Team: 'APEX', Attacks: 99, team_id: null } }),
     { enrolled: true, status: 'dropped', attacks: 12, teamName: 'APEX' },
     standings,
   );
@@ -337,14 +357,87 @@ test('classification admits only confirmed participants, preserves scores, and m
   assert.equal(active.teamScore, 999);
   assert.equal(active.attacks, 10);
   assert.equal(active.score, 25);
-  assert.equal(nonparticipant.status, 'inactive');
+  assert.equal(active.teamId, 5);
+  assert.equal(active.initialTeamSnapshot.name, 'APEX');
+  assert.equal(nonparticipant.status, 'not_participating');
   assert.equal(nonparticipant.enrolled, false);
   assert.equal(defeated.status, 'dropped');
   assert.equal(defeated.attacks, 7);
   assert.equal(terminal.status, 'dropped');
   assert.equal(terminal.attacks, 12);
   assert.equal(standings.byId.get(6).eliminated, true);
-  assert.equal(exporter.normalizeCompetition({ competition: { name: 'Elimination', score: 0, attacks: 0, team: 'Loose Cannons', team_id: null } }).teamId, null);
+  const normalized = exporter.normalizeCompetition({ competition: { Competition: 'Elimination', Score: 0, Attacks: 0, Team: 'Loose Cannons', team_id: 99 } });
+  assert.equal(normalized.teamName, 'Loose Cannons');
+  assert.equal(normalized.teamId, null);
+  assert.equal(normalized.rawTeamId, 99);
+});
+
+test('team details use two-digit standing IDs, expose placements, and index attack snapshots', () => {
+  const standings = exporter.normalizeTeamStandings({ elimination: { teams: [
+    { id: 5, name: 'APEX', position: 1, lives: 7, score: 100 },
+    { id: 12, name: 'Gold Dust', position: 12, lives: 0, score: 5 },
+  ] } });
+  assert.equal(standings.byId.get(12).eliminated, true);
+  assert.equal(exporter.exportTeamRecord(standings.byId.get(5)).twoDigitId, '05');
+  assert.equal(exporter.exportTeamRecord(standings.byId.get(5)).placement, '1st/12th place');
+  assert.equal(exporter.exportTeamRecord(standings.byId.get(12)).placement, '12th/12th place');
+  const detail = exporter.normalizeEliminationTeam({ eliminationteam: {
+    id: 5, name: 'APEX', position: 1, lives: 7,
+    members: { 8: { name: 'Active', attacks: 14, score: 20 } },
+  } }, standings.byId.get(5));
+  assert.equal(detail.members[0].id, 8);
+  assert.equal(detail.members[0].attacks, 14);
+  assert.equal(exporter.indexEliminationTeamMembers([detail]).get(8).teamId, 5);
+});
+
+test('master index persists initial teams, terminal attacks, current rosters, and historical members', () => {
+  const snapshot = {
+    factions: fixture.factions,
+    teams: [{ id: 5, name: 'APEX', position: 1, lives: 7, score: 100 }],
+    players: [
+      player({ id: 1, name: 'Active', teamId: 5, teamName: 'APEX', teamPosition: 1,
+        teamPlacement: '1st/12th place', initialTeamSnapshot: { id: 5, name: 'APEX', capturedAt: 'initial' } }),
+      player({ id: 2, name: 'Dropped', status: 'dropped', teamId: 6, teamName: 'Loose Cannons', attacks: 9,
+        initialTeamSnapshot: { id: 6, name: 'Loose Cannons', capturedAt: 'initial' } }),
+    ],
+    rosterMembers: [
+      { id: 1, name: 'Active', factionId: 100, factionName: 'Naughty Souls', factionTag: '$3xy' },
+      { id: 2, name: 'Dropped', factionId: 100, factionName: 'Naughty Souls', factionTag: '$3xy' },
+      { id: 3, name: 'Never', factionId: 100, factionName: 'Naughty Souls', factionTag: '$3xy', status: 'not_participating' },
+    ],
+    generatedAt: '2026-09-13T00:00:00.000Z',
+  };
+  const master = exporter.updateMasterIndex(snapshot, {
+    4: { id: 4, name: 'Historical', status: 'dropped', attacks: 4, currentRosterMember: true,
+      initialTeamSnapshot: { id: 7, name: 'High Voltage', capturedAt: 'old' },
+      finalAttackSnapshot: { attacks: 4, capturedAt: 'old-final' } },
+  }, '2026-09-13T00:00:00.000Z');
+  assert.equal(Object.keys(master).length, 4);
+  assert.equal(master[1].initialTeamSnapshot.name, 'APEX');
+  assert.equal(master[2].status, 'dropped');
+  assert.equal(master[2].finalAttackSnapshot.attacks, 9);
+  assert.equal(master[3].status, 'not_participating');
+  assert.equal(master[4].currentRosterMember, false);
+  const payload = JSON.parse(exporter.buildMasterElimJson({ ...snapshot, masterIndex: master }));
+  assert.equal(payload.exportType, 'torn-elimination-master-index');
+  assert.equal(payload.summary.indexedMemberCount, 4);
+  assert.equal(payload.summary.currentRosterCount, 3);
+  assert.equal(payload.teams[0].placement, '1st/12th place');
+});
+
+test('TornPDA injected keys are accepted and preflight settings are required before progress', () => {
+  assert.equal(exporter.isUsableKey('###PDA-APIKEY###'), false);
+  assert.equal(exporter.isUsableKey('injected-public-key-123'), true);
+  assert.match(source, /TornPDA injected key/);
+  assert.match(source, /data-key-source/);
+  assert.match(source, /config = await configureExport\(kind\)/);
+  assert.ok(source.indexOf('config = await configureExport(kind)') < source.indexOf('const progressDialog = createProgressDialog(kind)'));
+});
+
+test('completion reconciles API, member, and chunk counters before displaying 100 percent', () => {
+  assert.match(source, /apiCompleted: current\.apiTotal \?\? current\.apiCompleted/);
+  assert.match(source, /membersCompleted: current\.membersTotal \?\? current\.membersCompleted/);
+  assert.match(source, /chunksCompleted: current\.chunksTotal \?\? current\.chunksCompleted/);
 });
 
 test('supplied roster seed contains only enrolled participants and skips terminal dropouts', () => {
@@ -355,10 +448,10 @@ test('supplied roster seed contains only enrolled participants and skips termina
   const plan = exporter.participantLookupPlan([
     { id: 9999999, name: 'Not Enrolled', factionId: 8317, factionName: 'Naughty Souls', factionTag: '$3xy' },
   ], ledger, [8317, 44817]);
-  assert.equal(plan.lookups.length, 55);
+  assert.equal(plan.lookups.length, 56);
   assert.equal(plan.frozen.length, 8);
   assert.ok(plan.frozen.every((entry) => entry.status === 'dropped'));
-  assert.ok(!plan.lookups.some((entry) => entry.id === 9999999));
+  assert.ok(plan.lookups.some((entry) => entry.id === 9999999));
 });
 
 test('unseeded factions receive one roster discovery plan', () => {
@@ -435,7 +528,8 @@ test('live standings are mandatory and the exact endpoint is used without a sile
   assert.match(source, /scheduledApiGet\('\/torn\/elimination'\)/);
   assert.doesNotMatch(source, /scheduledApiGet\('\/torn\/elimination'\)\.catch/);
   assert.match(source, /response contained no team standings/);
-  assert.match(source, /incorrectly marking the alliance as dropped out/);
+  assert.match(source, /scheduledApiGet\(`\/torn\/\$\{team\.id\}\/eliminationteam`\)/);
+  assert.match(source, /standings\.teams\.filter\(\(team\) => !team\.eliminated && team\.lives !== 0\)/);
 });
 
 test('HTML escaping and faction parsing reject markup and invalid IDs', () => {

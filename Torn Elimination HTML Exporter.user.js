@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Elimination HTML Exporter
 // @namespace    https://github.com/SharpSplinter/torn-elimination-html-exporter
-// @version      1.8.0
-// @description  Export styled Torn HTML newsletters, Discord updates, and full faction Elimination JSON files.
+// @version      1.9.0
+// @description  Export Torn HTML, Discord updates, complete faction rosters, and the persistent Elimination master index.
 // @author       SharpSplinter
 // @homepageURL  https://github.com/SharpSplinter/torn-elimination-html-exporter
 // @supportURL   https://github.com/SharpSplinter/torn-elimination-html-exporter/issues
@@ -20,20 +20,22 @@
 (function eliminationHtmlExporter(global) {
   'use strict';
 
-  const VERSION = '1.8.0';
+  const VERSION = '1.9.0';
   const API_BASE = 'https://api.torn.com/v2';
   const PDA_API_KEY = '###PDA-APIKEY###';
   const BUTTON_LABELS = Object.freeze({
     newsletter: 'Export Torn HTML — Elimination Alliance Update (Top Performers, Team Styling & Dropout Roast)',
     discord: 'Export Discord Markdown — Elimination Alliance Update (Three Mobile-Safe Messages with Team Icons & Dropout Roast)',
-    leaderboard: 'Export JSON File — Full Faction Elimination Rankings (Current Faction; Alliance/Additional Factions Optional)',
+    leaderboard: 'Export JSON File — Complete Current Faction Rosters with Elimination Status (No Members Omitted)',
+    master: 'Export Master Elimination JSON — Entire Persistent Index with Team Placements, Initial Teams & Final Attacks',
   });
   const STORAGE = Object.freeze({
     apiKey: 'tehe.apiKey',
     factionIds: 'tehe.factionIds',
     history: 'tehe.rankHistory.v4',
-    snapshot: 'tehe.snapshotCache.v4',
+    snapshot: 'tehe.snapshotCache.v5',
     participants: 'tehe.participantLedger.v2',
+    masterIndex: 'tehe.masterEliminationIndex.v1',
     exports: 'tehe.generatedExports.v1',
   });
   const SHARED_EXPORT = Object.freeze({
@@ -52,6 +54,7 @@
   const REQUEST_START_INTERVAL_MS = Math.ceil(60000 / REQUESTS_PER_MINUTE);
   const MAX_CONCURRENT_REQUESTS = 6;
   const MEMBER_PROGRESS_CHUNK_SIZE = 10;
+  const TOTAL_ELIMINATION_TEAMS = 12;
 
   const TEAM_STYLES = Object.freeze({
     'rocket scientists': { name: 'Rocket Scientists', badge: 'RS', icon: '🚀', marker: '🟠', color: '#ff9f43' },
@@ -284,19 +287,23 @@
       const candidate = item?.team || item || {};
       const name = String(candidate.name || candidate.team || item?.name || '').trim();
       if (!name) continue;
+      const lives = toNumber(candidate.lives ?? candidate.life ?? item?.lives, null);
       const normalized = {
         id: toNumber(candidate.id ?? candidate.team_id ?? item?.id, null),
         name,
         score: toNumber(candidate.score ?? item?.score),
         position: toNumber(candidate.position ?? candidate.rank ?? item?.position, null),
-        eliminated: Boolean(candidate.eliminated ?? item?.eliminated),
+        lives,
+        eliminated: Boolean(candidate.eliminated ?? item?.eliminated) || lives === 0,
         participants: toNumber(candidate.participants ?? item?.participants, null),
         participantsLeft: toNumber(candidate.participants_left ?? item?.participants_left, null),
       };
       if (normalized.id) byId.set(normalized.id, normalized);
       byName.set(canonicalTeamName(name), normalized);
     }
-    return { byId, byName, valid: records.length > 0 };
+    const teams = [...byName.values()].sort((left, right) =>
+      toNumber(left.position, Number.MAX_SAFE_INTEGER) - toNumber(right.position, Number.MAX_SAFE_INTEGER));
+    return { byId, byName, teams, totalTeams: teams.length, valid: records.length > 0 };
   }
 
   function normalizeCompetition(payload) {
@@ -304,18 +311,50 @@
     const valid = Boolean(source && typeof source === 'object' && (
       Object.hasOwn(source, 'name')
       || Object.hasOwn(source, 'competition')
+      || Object.hasOwn(source, 'Competition')
       || Object.hasOwn(source, 'team')
+      || Object.hasOwn(source, 'Team')
       || Object.hasOwn(source, 'team_id')
       || Object.hasOwn(source, 'attacks')
+      || Object.hasOwn(source, 'Attacks')
     ));
     return {
       valid,
-      name: String(source.name || source.competition || ''),
-      score: toNumber(source.score),
-      attacks: toNumber(source.attacks),
-      teamName: String(source.team?.name || source.team || '').trim(),
-      teamId: toNumber(source.team?.id ?? source.team_id, null),
+      name: String(source.name || source.competition || source.Competition || ''),
+      score: toNumber(source.score ?? source.Score),
+      attacks: toNumber(source.attacks ?? source.Attacks),
+      teamName: String(source.Team?.name || source.Team || source.team?.name || source.team || '').trim(),
+      rawTeamId: toNumber(source.team?.id ?? source.team_id, null),
+      teamId: null,
     };
+  }
+
+  function normalizeEliminationTeam(payload, standing = {}) {
+    const root = unwrap(payload, 'eliminationteam') || {};
+    const source = root.team && typeof root.team === 'object' ? root.team : root;
+    const memberSource = source.members || source.participants || source.players || source.users || [];
+    const records = Array.isArray(memberSource)
+      ? memberSource
+      : Object.entries(memberSource).map(([id, member]) => ({ id, ...(member || {}) }));
+    const members = records.map((member) => ({
+      id: toNumber(member.id ?? member.user_id ?? member.player_id ?? member.ID, null),
+      name: String(member.name || member.player_name || ''),
+      attacks: toNumber(member.attacks ?? member.attack_count ?? member.Attacks),
+      score: toNumber(member.score ?? member.Score),
+    })).filter((member) => member.id);
+    return {
+      id: toNumber(source.id ?? source.team_id ?? standing.id, null),
+      name: String(source.name || source.team_name || standing.name || ''),
+      position: toNumber(source.position ?? source.rank ?? standing.position, null),
+      lives: toNumber(source.lives ?? standing.lives, null),
+      score: toNumber(source.score ?? standing.score),
+      members,
+    };
+  }
+
+  function teamPlacement(team, totalTeams = TOTAL_ELIMINATION_TEAMS) {
+    const position = toNumber(team?.position, null);
+    return position == null ? null : `${ordinal(position)}/${ordinal(totalTeams)} place`;
   }
 
   function participantComparator(a, b) {
@@ -379,30 +418,40 @@
     if (prior?.enrolled && prior.status === 'dropped') {
       return { ...member, ...prior, status: 'dropped', enrolled: true, teamRank: null };
     }
-    const inElimination = /elimination/i.test(competition.name);
-    let currentTeam = competition.teamName;
-    if (!currentTeam && competition.teamId && standings.byId.has(competition.teamId)) {
-      currentTeam = standings.byId.get(competition.teamId).name;
-    }
-    const previousTeam = prior?.teamName || KNOWN_FORMER_TEAMS[member.id] || '';
-    const teamName = currentTeam || previousTeam;
-    const standing = standings.byId.get(competition.teamId) || standings.byName.get(canonicalTeamName(teamName));
+    const inElimination = !competition.name || /elimination/i.test(competition.name);
+    const currentTeamValue = String(competition.teamName || '').trim();
+    const currentKey = canonicalTeamName(currentTeamValue);
+    const currentStanding = standings.byName.get(currentKey);
+    const initialTeamName = prior?.initialTeamSnapshot?.name || prior?.initialTeamName
+      || prior?.teamName || KNOWN_FORMER_TEAMS[member.id] || '';
+    const initialStanding = standings.byName.get(canonicalTeamName(initialTeamName));
+    const teamName = currentStanding?.name || initialStanding?.name || initialTeamName;
+    const standing = currentStanding || initialStanding;
     const wasEnrolled = Boolean(prior?.enrolled);
-    const newlyEnrolled = inElimination && competition.teamId != null && Boolean(standing);
+    const newlyEnrolled = competition.valid && inElimination && Boolean(currentStanding);
     const enrolled = wasEnrolled || newlyEnrolled;
-    let status = 'inactive';
-    if (enrolled && standing?.eliminated) status = 'dropped';
-    else if (enrolled && competition.valid && inElimination && competition.teamId != null && standing) status = 'active';
-    else if (enrolled && competition.valid) status = 'dropped';
+    let status = 'not_participating';
+    if (enrolled && (initialStanding?.eliminated || initialStanding?.lives === 0)) status = 'dropped';
+    else if (enrolled && competition.valid && inElimination && currentStanding) status = 'active';
+    else if (enrolled && competition.valid && (!currentStanding || currentKey === 'unknown')) status = 'dropped';
     else if (enrolled) status = prior?.status || 'active';
     return {
       ...member,
       status,
       enrolled,
       teamName,
-      teamId: competition.teamId || standing?.id || null,
+      teamId: standing?.id ?? null,
       teamScore: standing?.score ?? competition.score,
       teamPosition: standing?.position ?? null,
+      teamPlacement: teamPlacement(standing, TOTAL_ELIMINATION_TEAMS),
+      initialTeamSnapshot: prior?.initialTeamSnapshot || (newlyEnrolled ? {
+        id: currentStanding.id ?? null,
+        name: currentStanding.name,
+        position: currentStanding.position ?? null,
+        placement: teamPlacement(currentStanding, TOTAL_ELIMINATION_TEAMS),
+        lives: currentStanding.lives ?? null,
+        capturedAt: new Date().toISOString(),
+      } : null),
       score: Math.max(toNumber(prior?.score), competition.score),
       attacks: Math.max(toNumber(prior?.attacks), competition.attacks),
     };
@@ -694,79 +743,133 @@ ${body}
     return newsletterShell(parts.join('\n'));
   }
 
+  function exportTeamRecord(team, totalTeams = TOTAL_ELIMINATION_TEAMS) {
+    return {
+      id: team?.id ?? null,
+      twoDigitId: team?.id == null ? null : String(team.id).padStart(2, '0'),
+      name: team?.name || '',
+      position: toNumber(team?.position, null),
+      placement: teamPlacement(team, totalTeams),
+      totalTeams,
+      lives: toNumber(team?.lives, null),
+      score: toNumber(team?.score),
+      eliminated: Boolean(team?.eliminated) || toNumber(team?.lives, null) === 0,
+      detailLookupSkipped: Boolean(team?.detailLookupSkipped),
+    };
+  }
+
+  function exportMemberRecord(member) {
+    const status = member?.status === 'active' || member?.status === 'dropped'
+      ? member.status : 'not_participating';
+    return {
+      id: member.id,
+      name: member.name,
+      profileUrl: `https://www.torn.com/profiles.php?XID=${member.id}`,
+      status,
+      participating: status === 'active',
+      droppedOut: status === 'dropped',
+      notParticipating: status === 'not_participating',
+      currentRosterMember: member.currentRosterMember !== false,
+      factionId: member.factionId,
+      factionName: member.factionName,
+      factionTag: member.factionTag,
+      teamId: status === 'active' ? member.teamId ?? null : null,
+      teamName: status === 'active' ? member.teamName || '' : '',
+      teamPlacement: status === 'active' ? member.teamPlacement || null : null,
+      formerTeamId: status === 'dropped' ? member.formerTeamId ?? member.teamId ?? member.initialTeamSnapshot?.id ?? null : null,
+      formerTeamName: status === 'dropped' ? member.formerTeamName || member.teamName || member.initialTeamSnapshot?.name || '' : '',
+      attacks: status === 'not_participating' ? 0 : toNumber(member.attacks),
+      score: status === 'not_participating' ? 0 : toNumber(member.score),
+      allianceRank: status === 'not_participating' ? null : toNumber(member.allianceRank, null),
+      factionRank: status === 'not_participating' ? null : toNumber(member.factionRank, null),
+      teamRank: status === 'active' ? toNumber(member.teamRank, null) : null,
+      movement: status === 'not_participating' ? 0 : toNumber(member.movement),
+      previousAllianceRank: toNumber(member.previousAllianceRank, null),
+      previousFactionRank: toNumber(member.previousFactionRank, null),
+      initialTeamSnapshot: member.initialTeamSnapshot || null,
+      latestAttackSnapshot: member.latestAttackSnapshot || (status === 'not_participating' ? null : {
+        attacks: toNumber(member.attacks), capturedAt: member.capturedAt || null,
+      }),
+      finalAttackSnapshot: status === 'dropped'
+        ? member.finalAttackSnapshot || { attacks: toNumber(member.attacks), capturedAt: member.droppedOutAt || member.capturedAt || null }
+        : null,
+      droppedOutAt: status === 'dropped' ? member.droppedOutAt || null : null,
+      availability: String(member.availability || ''),
+    };
+  }
+
   function buildFactionJson(snapshot) {
-    const players = (snapshot.players || []).filter((player) => player.status !== 'inactive');
+    const participantsById = new Map((snapshot.players || []).map((player) => [player.id, player]));
+    const roster = (snapshot.rosterMembers || snapshot.players || []).map((member) => ({
+      ...member,
+      ...(participantsById.get(member.id) || {}),
+      currentRosterMember: true,
+      status: participantsById.get(member.id)?.status || member.status || 'not_participating',
+    }));
     const factions = snapshot.factions || [];
-    const exportedAt = new Date().toISOString();
-    const cleanPlayer = (player) => ({
-      id: player.id,
-      name: player.name,
-      profileUrl: `https://www.torn.com/profiles.php?XID=${player.id}`,
-      status: player.status,
-      participating: player.status === 'active',
-      droppedOut: player.status === 'dropped',
-      factionId: player.factionId,
-      factionName: player.factionName,
-      factionTag: player.factionTag,
-      teamId: player.teamId ?? null,
-      teamName: player.teamName || '',
-      formerTeamId: player.status === 'dropped' ? player.formerTeamId ?? player.teamId ?? null : null,
-      formerTeamName: player.status === 'dropped' ? player.formerTeamName || player.teamName || '' : '',
-      attacks: toNumber(player.attacks),
-      score: toNumber(player.score),
-      allianceRank: toNumber(player.allianceRank, null),
-      factionRank: toNumber(player.factionRank, null),
-      teamRank: player.status === 'active' ? toNumber(player.teamRank, null) : null,
-      movement: toNumber(player.movement),
-      previousAllianceRank: toNumber(player.previousAllianceRank, null),
-      previousFactionRank: toNumber(player.previousFactionRank, null),
-      droppedOutAt: player.status === 'dropped' && player.droppedOutAt
-        ? new Date(toNumber(player.droppedOutAt)).toISOString() : null,
-      availability: String(player.availability || ''),
-    });
+    const totalTeams = TOTAL_ELIMINATION_TEAMS;
     const factionExports = factions.map((faction) => {
-      const participants = players
-        .filter((player) => player.factionId === faction.id)
-        .sort((left, right) => toNumber(left.factionRank, Number.MAX_SAFE_INTEGER)
-          - toNumber(right.factionRank, Number.MAX_SAFE_INTEGER)
-          || participantComparator(left, right));
+      const members = roster.filter((member) => member.factionId === faction.id)
+        .sort((left, right) => String(left.name).localeCompare(String(right.name), undefined, { sensitivity: 'base' }));
       return {
         id: faction.id,
         name: faction.name,
         tag: faction.tag || '',
-        participantCount: participants.length,
-        activeCount: participants.filter((player) => player.status === 'active').length,
-        droppedOutCount: participants.filter((player) => player.status === 'dropped').length,
-        totalAttacks: participants.reduce((total, player) => total + toNumber(player.attacks), 0),
-        participants: participants.map(cleanPlayer),
+        memberCount: members.length,
+        participantCount: members.filter((member) => member.status === 'active' || member.status === 'dropped').length,
+        activeCount: members.filter((member) => member.status === 'active').length,
+        droppedOutCount: members.filter((member) => member.status === 'dropped').length,
+        notParticipatingCount: members.filter((member) => !['active', 'dropped'].includes(member.status)).length,
+        totalAttacks: members.reduce((total, member) => total + toNumber(member.attacks), 0),
+        members: members.map(exportMemberRecord),
       };
-    }).filter((faction) => faction.participantCount > 0);
-    const result = {
-      schemaVersion: 1,
-      exportType: 'torn-elimination-full-faction-rankings',
+    });
+    return JSON.stringify({
+      schemaVersion: 2,
+      exportType: 'torn-elimination-full-faction-rosters',
       exporterVersion: VERSION,
-      exportedAt,
+      exportedAt: new Date().toISOString(),
       sourceGeneratedAt: snapshot.generatedAt || null,
       eventKey: snapshot.eventKey || null,
       scope: snapshot.scope || null,
       summary: {
         factionCount: factionExports.length,
-        participantCount: players.length,
-        activeCount: players.filter((player) => player.status === 'active').length,
-        droppedOutCount: players.filter((player) => player.status === 'dropped').length,
-        totalAttacks: players.reduce((total, player) => total + toNumber(player.attacks), 0),
+        memberCount: roster.length,
+        participantCount: roster.filter((member) => ['active', 'dropped'].includes(member.status)).length,
+        activeCount: roster.filter((member) => member.status === 'active').length,
+        droppedOutCount: roster.filter((member) => member.status === 'dropped').length,
+        notParticipatingCount: roster.filter((member) => !['active', 'dropped'].includes(member.status)).length,
+        totalAttacks: roster.reduce((total, member) => total + toNumber(member.attacks), 0),
       },
-      teams: (snapshot.teams || []).map((team) => ({
-        id: team.id ?? null,
-        name: team.name || '',
-        position: team.position ?? null,
-        lives: toNumber(team.lives),
-        score: toNumber(team.score),
-        eliminated: Boolean(team.eliminated),
-      })),
+      teams: (snapshot.teams || []).map((team) => exportTeamRecord(team, totalTeams)),
       factions: factionExports,
-    };
-    return JSON.stringify(result, null, 2);
+    }, null, 2);
+  }
+
+  function buildMasterElimJson(snapshot) {
+    const masterMembers = Object.values(snapshot.masterIndex || {}).map(exportMemberRecord)
+      .sort((left, right) => toNumber(left.allianceRank, Number.MAX_SAFE_INTEGER)
+        - toNumber(right.allianceRank, Number.MAX_SAFE_INTEGER)
+        || String(left.name).localeCompare(String(right.name), undefined, { sensitivity: 'base' }));
+    const totalTeams = TOTAL_ELIMINATION_TEAMS;
+    return JSON.stringify({
+      schemaVersion: 1,
+      exportType: 'torn-elimination-master-index',
+      exporterVersion: VERSION,
+      exportedAt: new Date().toISOString(),
+      sourceGeneratedAt: snapshot.generatedAt || null,
+      eventKey: snapshot.eventKey || null,
+      scope: snapshot.scope || null,
+      summary: {
+        indexedMemberCount: masterMembers.length,
+        currentRosterCount: masterMembers.filter((member) => member.currentRosterMember).length,
+        activeCount: masterMembers.filter((member) => member.status === 'active').length,
+        droppedOutCount: masterMembers.filter((member) => member.status === 'dropped').length,
+        notParticipatingCount: masterMembers.filter((member) => member.status === 'not_participating').length,
+      },
+      teams: (snapshot.teams || []).map((team) => exportTeamRecord(team, totalTeams)),
+      members: masterMembers,
+    }, null, 2);
   }
 
   function factionJsonFilename(snapshot, now = new Date()) {
@@ -774,6 +877,10 @@ ${body}
       .filter(Boolean).join('-').replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'faction';
     const date = now.toISOString().replace(/[:.]/g, '-');
     return `torn-elimination-${scope}-${date}.json`;
+  }
+
+  function masterJsonFilename(now = new Date()) {
+    return `torn-elimination-master-index-${now.toISOString().replace(/[:.]/g, '-')}.json`;
   }
 
   function downloadJsonFile(content, filename) {
@@ -959,20 +1066,28 @@ ${body}
       own: Boolean(faction?.own),
     })).filter((faction) => faction.id != null);
     const factionById = new Map(factions.map((faction) => [faction.id, faction]));
-    const teamById = new Map((source.teams || []).map((team) => [toNumber(team?.id, null), team]));
-    const players = source.members.map((member) => {
+    const normalizedTeams = (source.teams || []).map((team) => ({
+      ...team,
+      id: toNumber(team?.id, null),
+      lives: toNumber(team?.lives, null),
+      eliminated: Boolean(team?.eliminated) || toNumber(team?.lives, null) === 0,
+    }));
+    const teamById = new Map(normalizedTeams.map((team) => [team.id, team]));
+    const teamByName = new Map(normalizedTeams.map((team) => [canonicalTeamName(team.name), team]));
+    const normalizedMembers = source.members.map((member) => {
       const id = toNumber(member?.id, null);
       const factionId = toNumber(member?.factionId, null);
       const faction = factionById.get(factionId);
       const dropped = Boolean(member?.droppedOut) || member?.status === 'dropped';
       const active = !dropped && (Boolean(member?.participating) || member?.status === 'active');
-      const teamId = dropped
+      const suppliedTeamId = dropped
         ? toNumber(member?.formerTeamId ?? member?.teamId, null)
         : toNumber(member?.teamId, null);
       const teamName = dropped
         ? String(member?.formerTeamName || member?.teamName || 'Former team')
         : String(member?.teamName || '');
-      const standing = teamById.get(teamId);
+      const standing = teamById.get(suppliedTeamId) || teamByName.get(canonicalTeamName(teamName));
+      const teamId = standing?.id ?? suppliedTeamId;
       const allianceRank = toNumber(member?.allianceRank, null);
       const factionRank = toNumber(member?.factionRank, null);
       const previousAllianceRank = toNumber(member?.previousAllianceRank, null);
@@ -983,7 +1098,7 @@ ${body}
         factionName: String(member?.factionName || faction?.name || 'Unknown faction'),
         factionTag: String(member?.factionTag || faction?.tag || ''),
         enrolled: active || dropped,
-        status: dropped ? 'dropped' : active ? 'active' : 'inactive',
+        status: dropped ? 'dropped' : active ? 'active' : 'not_participating',
         participating: active,
         droppedOut: dropped,
         teamId,
@@ -1003,8 +1118,21 @@ ${body}
           previousAllianceRank != null && allianceRank != null ? previousAllianceRank - allianceRank : 0),
         droppedOutAt: dropped ? toNumber(member?.droppedOutAt) : 0,
         availability: String(member?.availability || 'shared'),
+        initialTeamSnapshot: member?.initialTeamSnapshot || ((active || dropped) && standing ? {
+          id: standing.id ?? null,
+          name: standing.name || teamName,
+          position: standing.position ?? null,
+          placement: teamPlacement(standing, TOTAL_ELIMINATION_TEAMS),
+          lives: standing.lives ?? null,
+          capturedAt: member?.capturedAt || source.generatedAt || null,
+        } : null),
+        finalAttackSnapshot: member?.finalAttackSnapshot || (dropped ? {
+          attacks: toNumber(member?.attacks), capturedAt: member?.droppedOutAt || member?.capturedAt || null,
+        } : null),
+        currentRosterMember: member?.currentRosterMember !== false,
       };
-    }).filter((player) => player.id && player.enrolled && player.status !== 'inactive')
+    }).filter((member) => member.id);
+    const players = normalizedMembers.filter((player) => player.enrolled && player.status !== 'not_participating')
       .sort((left, right) => toNumber(left.allianceRank, Number.MAX_SAFE_INTEGER)
         - toNumber(right.allianceRank, Number.MAX_SAFE_INTEGER)
         || participantComparator(left, right));
@@ -1012,6 +1140,8 @@ ${body}
     return {
       factions,
       players,
+      rosterMembers: normalizedMembers.filter((member) => member.currentRosterMember !== false),
+      teams: normalizedTeams,
       generatedAt: String(source.generatedAt || new Date(toNumber(source.updatedAt) || Date.now()).toISOString()),
       updatedAt: toNumber(source.updatedAt, null),
       eventKey: String(source.eventKey || ''),
@@ -1123,8 +1253,7 @@ ${body}
   function readParticipantLedger(raw) {
     const parsed = readHistory(raw);
     const saved = parsed?.participants && typeof parsed.participants === 'object' ? parsed.participants : parsed;
-    const fromSharedRankings = parsed?.source === SHARED_EXPORT.snapshot;
-    const ledger = fromSharedRankings ? {} : seedParticipantLedger();
+    const ledger = seedParticipantLedger();
     for (const [key, value] of Object.entries(saved || {})) {
       if (!value || typeof value !== 'object') continue;
       const id = toNumber(value.id ?? key, null);
@@ -1144,14 +1273,80 @@ ${body}
     return ledger;
   }
 
+  function readMasterIndex(raw) {
+    const parsed = readHistory(raw);
+    const source = parsed?.members && typeof parsed.members === 'object' ? parsed.members : parsed;
+    return Object.fromEntries(Object.entries(source || {}).flatMap(([key, value]) => {
+      const id = toNumber(value?.id ?? key, null);
+      return id && value && typeof value === 'object' ? [[id, { ...value, id }]] : [];
+    }));
+  }
+
+  function updateMasterIndex(snapshot, previousRaw = {}, capturedAt = new Date().toISOString()) {
+    const previous = readMasterIndex(previousRaw);
+    const next = Object.fromEntries(Object.values(previous).map((member) => [member.id, {
+      ...member, currentRosterMember: false,
+    }]));
+    const participants = new Map((snapshot.players || []).map((player) => [player.id, player]));
+    const roster = snapshot.rosterMembers || [];
+    const merge = (source, currentRosterMember) => {
+      const prior = next[source.id] || {};
+      const terminal = prior.status === 'dropped';
+      const status = terminal ? 'dropped'
+        : source.status === 'active' || source.status === 'dropped' ? source.status : 'not_participating';
+      const attacks = Math.max(toNumber(prior.attacks), toNumber(source.attacks));
+      const initialTeamSnapshot = prior.initialTeamSnapshot || source.initialTeamSnapshot || null;
+      next[source.id] = {
+        ...prior,
+        ...source,
+        id: source.id,
+        name: source.name || prior.name || `Player ${source.id}`,
+        status,
+        enrolled: terminal || status === 'active' || status === 'dropped',
+        currentRosterMember,
+        attacks,
+        initialTeamSnapshot,
+        latestAttackSnapshot: status === 'not_participating' ? prior.latestAttackSnapshot || null : {
+          attacks, capturedAt,
+        },
+        finalAttackSnapshot: terminal
+          ? prior.finalAttackSnapshot || { attacks: toNumber(prior.attacks), capturedAt: prior.droppedOutAt || prior.capturedAt || capturedAt }
+          : status === 'dropped'
+            ? source.finalAttackSnapshot || { attacks, capturedAt }
+            : null,
+        droppedOutAt: status === 'dropped' ? prior.droppedOutAt || source.droppedOutAt || capturedAt : null,
+        capturedAt,
+      };
+    };
+    for (const rosterMember of roster) merge({
+      ...rosterMember,
+      ...(participants.get(rosterMember.id) || {}),
+      status: participants.get(rosterMember.id)?.status || rosterMember.status || 'not_participating',
+    }, true);
+    for (const participant of snapshot.players || []) {
+      if (!next[participant.id]?.currentRosterMember) merge(participant, false);
+    }
+    return next;
+  }
+
   async function persistSharedSnapshot(snapshot) {
     const capturedAt = new Date().toISOString();
-    const participants = Object.fromEntries(snapshot.players.map((player) => [player.id, {
+    const existingParticipants = readParticipantLedger(await storageGet(STORAGE.participants, {}));
+    const sharedParticipants = Object.fromEntries(snapshot.players.map((player) => [player.id, {
       ...player,
       enrolled: true,
       status: player.status === 'dropped' ? 'dropped' : 'active',
       capturedAt,
     }]));
+    const participants = readParticipantLedger(Object.fromEntries(
+      [...new Set([...Object.keys(existingParticipants), ...Object.keys(sharedParticipants)])].map((id) => {
+        const existing = existingParticipants[id];
+        return [id, existing?.status === 'dropped' ? existing : (sharedParticipants[id] || existing)];
+      }),
+    ));
+    const existingMaster = await storageGet(STORAGE.masterIndex, {});
+    const masterIndex = updateMasterIndex(snapshot, existingMaster, capturedAt);
+    snapshot.masterIndex = masterIndex;
     await Promise.all([
       storageSet(STORAGE.participants, {
         schemaVersion: 1,
@@ -1160,6 +1355,7 @@ ${body}
         participants,
       }),
       storageSet(STORAGE.history, serializeHistory(snapshot.players)),
+      storageSet(STORAGE.masterIndex, { schemaVersion: 1, updatedAt: snapshot.updatedAt, members: masterIndex }),
     ]);
   }
 
@@ -1184,6 +1380,16 @@ ${body}
         factionTag: terminal ? previous.factionTag : player.factionTag,
         teamName: terminal ? previous.teamName : (player.teamName || previous.teamName || ''),
         teamId: terminal ? (previous.teamId ?? null) : (player.teamId ?? previous.teamId ?? null),
+        teamPosition: terminal ? previous.teamPosition ?? null : player.teamPosition ?? previous.teamPosition ?? null,
+        teamPlacement: terminal ? previous.teamPlacement ?? null : player.teamPlacement ?? previous.teamPlacement ?? null,
+        initialTeamSnapshot: previous.initialTeamSnapshot || player.initialTeamSnapshot || (player.teamName ? {
+          id: player.teamId ?? null,
+          name: player.teamName,
+          position: player.teamPosition ?? null,
+          placement: player.teamPlacement ?? null,
+          lives: null,
+          capturedAt,
+        } : null),
         attacks: terminal ? toNumber(previous.attacks) : Math.max(toNumber(previous.attacks), toNumber(player.attacks)),
         score: terminal ? toNumber(previous.score) : Math.max(toNumber(previous.score), toNumber(player.score)),
         status: terminal || player.status === 'dropped' ? 'dropped' : 'active',
@@ -1198,6 +1404,12 @@ ${body}
           ? (factionPositiveCounts.get(player.factionId) || 0)
           : previous.zeroRankFactionPositiveCount ?? null,
         capturedAt,
+        droppedOutAt: terminal
+          ? previous.droppedOutAt || previous.capturedAt || capturedAt
+          : player.status === 'dropped' ? player.droppedOutAt || capturedAt : null,
+        finalAttackSnapshot: terminal
+          ? previous.finalAttackSnapshot || { attacks: toNumber(previous.attacks), capturedAt: previous.droppedOutAt || previous.capturedAt || capturedAt }
+          : player.status === 'dropped' ? { attacks: toNumber(player.attacks), capturedAt } : null,
       };
     }
     return ledger;
@@ -1205,27 +1417,15 @@ ${body}
 
   function participantLookupPlan(members, ledger, factionIds) {
     const selected = new Set(factionIds.map(Number));
-    const rosterById = new Map(members.map((member) => [member.id, member]));
-    const knownByFaction = new Map();
+    const rosterById = new Map(members.filter((member) => selected.has(toNumber(member.factionId)))
+      .map((member) => [member.id, member]));
+    const candidates = [...rosterById.values()];
     for (const participant of Object.values(ledger)) {
       if (!participant?.enrolled || !selected.has(toNumber(participant.factionId))) continue;
-      if (!knownByFaction.has(participant.factionId)) knownByFaction.set(participant.factionId, []);
-      knownByFaction.get(participant.factionId).push(participant);
-    }
-
-    const candidates = [];
-    for (const factionId of selected) {
-      const known = knownByFaction.get(factionId) || [];
-      if (known.length) {
-        for (const participant of known) {
-          const roster = rosterById.get(participant.id);
-          candidates.push(participant.status === 'dropped'
-            ? { ...participant }
-            : { ...participant, ...(roster || {}), enrolled: true });
-        }
-      } else {
-        candidates.push(...members.filter((member) => member.factionId === factionId));
-      }
+      const roster = rosterById.get(participant.id);
+      candidates.push(participant.status === 'dropped'
+        ? { ...participant, ...(roster || {}), enrolled: true, status: 'dropped' }
+        : { ...participant, ...(roster || {}), enrolled: true });
     }
 
     const unique = [...new Map(candidates.map((member) => [member.id, member])).values()];
@@ -1242,6 +1442,25 @@ ${body}
       enrolled: true,
       teamRank: null,
     };
+  }
+
+  function indexEliminationTeamMembers(teamDetails) {
+    const byMemberId = new Map();
+    for (const detail of teamDetails || []) {
+      for (const member of detail.members || []) {
+        const previous = byMemberId.get(member.id);
+        if (!previous || toNumber(member.attacks) >= toNumber(previous.attacks)) {
+          byMemberId.set(member.id, {
+            ...member,
+            teamId: detail.id ?? null,
+            teamName: detail.name || '',
+            teamPosition: detail.position ?? null,
+            teamLives: detail.lives ?? null,
+          });
+        }
+      }
+    }
+    return byMemberId;
   }
 
   function serializeHistory(players) {
@@ -1400,6 +1619,9 @@ ${body}
       if (phase === 'rosters') {
         const rosterCompleted = Math.max(0, apiCompleted - apiOffset);
         percent = 5 + Math.round((Math.min(rosterCompleted, rosterApiCalls) / Math.max(1, rosterApiCalls)) * 20);
+      } else if (phase === 'teams') {
+        percent = 20 + Math.round((Math.max(0, apiCompleted - apiOffset - rosterApiCalls)
+          / Math.max(1, apiTotal - apiOffset - rosterApiCalls)) * 10);
       } else if (phase === 'members') {
         percent = 25 + Math.round((membersCompleted / Math.max(1, membersTotal || 0)) * 70);
       } else if (phase === 'finalizing') {
@@ -1459,6 +1681,23 @@ ${body}
     if (!standings.valid) {
       throw new Error('The Torn /torn/elimination response contained no team standings. Export stopped to prevent false dropout results.');
     }
+    if (standings.teams.some((team) => team.id == null)) {
+      throw new Error('The Torn /torn/elimination response omitted one or more team IDs. Export stopped before making invalid elimination-team calls.');
+    }
+    const detailEligibleTeams = standings.teams.filter((team) => !team.eliminated && team.lives !== 0);
+    phase = 'teams';
+    apiTotal += detailEligibleTeams.length;
+    emitProgress(`Loading ${detailEligibleTeams.length} surviving team record${detailEligibleTeams.length === 1 ? '' : 's'}; zero-life teams are retained from standings without invalid detail calls…`);
+    const teamDetails = await Promise.all(detailEligibleTeams.map(async (team) =>
+      normalizeEliminationTeam(await scheduledApiGet(`/torn/${team.id}/eliminationteam`), team)));
+    const detailByTeamId = new Map(teamDetails.map((team) => [team.id, team]));
+    const detailMembers = indexEliminationTeamMembers(teamDetails);
+    const teams = standings.teams.map((team) => ({
+      ...team,
+      ...(detailByTeamId.get(team.id) || {}),
+      detailLookupSkipped: team.eliminated || team.lives === 0,
+      detailMemberCount: detailByTeamId.get(team.id)?.members?.length ?? null,
+    }));
     const factions = factionPayloads.map((entry) => entry.faction);
     const members = factionPayloads.flatMap((entry) => entry.members);
     const previousHistory = readHistory(await storageGet(STORAGE.history, {}));
@@ -1474,11 +1713,15 @@ ${body}
     chunksTotal = Math.ceil(membersTotal / MEMBER_PROGRESS_CHUNK_SIZE);
     apiTotal += membersTotal;
     emitProgress(`Loading ${membersTotal} active or unresolved participant record${membersTotal === 1 ? '' : 's'} in ${chunksTotal} progress chunk${chunksTotal === 1 ? '' : 's'}; reusing ${lookupPlan.frozen.length} confirmed dropout${lookupPlan.frozen.length === 1 ? '' : 's'} without API calls…`);
-    const normalizedResponses = [];
     const freshRecords = await Promise.all(lookupPlan.lookups.map(async (member) => {
       const payload = await scheduledApiGet(`/user/${member.id}/competition`);
-      const competition = normalizeCompetition(payload);
-      normalizedResponses.push({ member, competition });
+      const normalizedCompetition = normalizeCompetition(payload);
+      const teamDetailMember = detailMembers.get(member.id);
+      const competition = {
+        ...normalizedCompetition,
+        attacks: Math.max(toNumber(normalizedCompetition.attacks), toNumber(teamDetailMember?.attacks)),
+        score: Math.max(toNumber(normalizedCompetition.score), toNumber(teamDetailMember?.score)),
+      };
       const record = classifyMember(member, competition, participantLedger[member.id], standings);
       membersCompleted += 1;
       const currentChunk = Math.min(chunksTotal, Math.max(1, Math.ceil(membersCompleted / MEMBER_PROGRESS_CHUNK_SIZE)));
@@ -1487,23 +1730,27 @@ ${body}
     }));
     const frozenRecords = lookupPlan.frozen.map((participant) => frozenParticipantRecord(participant, standings));
     const records = [...freshRecords, ...frozenRecords];
-    const previouslyActive = lookupPlan.lookups.filter((member) => participantLedger[member.id]?.status === 'active');
-    const activeStandingsExist = [...standings.byId.values()].some((team) => !team.eliminated);
-    if (
-      previouslyActive.length >= 5
-      && activeStandingsExist
-      && freshRecords.filter((record) => record.status === 'active').length === 0
-      && normalizedResponses.every(({ competition }) => competition.valid && competition.teamId == null)
-    ) {
-      throw new Error('Torn returned no team enrollment for every known active participant. Export stopped instead of incorrectly marking the alliance as dropped out.');
-    }
 
     phase = 'finalizing';
     emitProgress('Calculating alliance, faction, and team rankings…');
-    const players = assignRanks(records.filter((player) => player.enrolled && player.status !== 'inactive'), rankHistory);
-    await storageSet(STORAGE.participants, serializeParticipantLedger(players, participantLedger));
-    await storageSet(STORAGE.history, serializeHistory(players));
-    return { factions, players, generatedAt: new Date().toISOString() };
+    const players = assignRanks(records.filter((player) => player.enrolled && player.status !== 'not_participating'), rankHistory);
+    const recordById = new Map(records.map((record) => [record.id, record]));
+    const rosterMembers = members.map((member) => ({
+      ...member,
+      ...(recordById.get(member.id) || {}),
+      currentRosterMember: true,
+      status: recordById.get(member.id)?.status || 'not_participating',
+    }));
+    const participantState = serializeParticipantLedger(players, participantLedger);
+    const generatedAt = new Date().toISOString();
+    const baseSnapshot = { factions, players, rosterMembers, teams, generatedAt };
+    const masterIndex = updateMasterIndex(baseSnapshot, await storageGet(STORAGE.masterIndex, {}), generatedAt);
+    await Promise.all([
+      storageSet(STORAGE.participants, participantState),
+      storageSet(STORAGE.history, serializeHistory(players)),
+      storageSet(STORAGE.masterIndex, { schemaVersion: 1, updatedAt: generatedAt, members: masterIndex }),
+    ]);
+    return { ...baseSnapshot, masterIndex };
   }
 
   function isSnapshotCacheFresh(entry, now = Date.now(), maxAgeMs = SNAPSHOT_CACHE_MAX_AGE_MS) {
@@ -1514,7 +1761,10 @@ ${body}
       && age >= 0
       && age < maxAgeMs
       && Array.isArray(snapshot?.factions)
-      && Array.isArray(snapshot?.players);
+      && Array.isArray(snapshot?.players)
+      && Array.isArray(snapshot?.rosterMembers)
+      && Array.isArray(snapshot?.teams)
+      && snapshot?.masterIndex && typeof snapshot.masterIndex === 'object';
   }
 
   function createSnapshotProvider(options) {
@@ -1528,32 +1778,38 @@ ${body}
     } = options;
     let memoryCache = null;
     let inFlight = null;
+    let inFlightScope = null;
 
     return function getSnapshot(context) {
-      if (inFlight) return inFlight;
+      const scopeKey = String(context?.scopeKey || 'default');
+      if (inFlight && inFlightScope === scopeKey) return inFlight;
       inFlight = (async () => {
         const checkedAt = now();
         let cached = memoryCache;
-        if (!isSnapshotCacheFresh(cached, checkedAt, maxAgeMs)) cached = await loadCache();
-        if (isSnapshotCacheFresh(cached, checkedAt, maxAgeMs)) {
+        const usable = (entry) => isSnapshotCacheFresh(entry, checkedAt, maxAgeMs)
+          && String(entry.scopeKey || 'default') === scopeKey;
+        if (!usable(cached)) cached = await loadCache();
+        if (usable(cached)) {
           memoryCache = cached;
           onCacheHit(cached, checkedAt, context);
           return cached.snapshot;
         }
 
         const snapshot = await fetchSnapshot(context);
-        const entry = { cachedAt: now(), snapshot };
+        const entry = { cachedAt: now(), scopeKey, snapshot };
         memoryCache = entry;
         await saveCache(entry);
         return snapshot;
       })();
-      inFlight.finally(() => { inFlight = null; }).catch(() => {});
+      inFlightScope = scopeKey;
+      inFlight.finally(() => { inFlight = null; inFlightScope = null; }).catch(() => {});
       return inFlight;
     };
   }
 
   function isUsableKey(key) {
-    return Boolean(key && key !== PDA_API_KEY && key.length >= 10);
+    const placeholder = ['###', 'PDA-APIKEY', '###'].join('');
+    return Boolean(key && key !== placeholder && key.length >= 10);
   }
 
   async function resolveApiKey() {
@@ -1631,7 +1887,78 @@ ${body}
     } catch { return false; }
   }
 
+  async function configureExport(kind) {
+    const savedKey = String(await storageGet(STORAGE.apiKey, '') || '').trim();
+    const pdaKeyAvailable = isUsableKey(PDA_API_KEY);
+    const savedFactionIds = await storageGet(STORAGE.factionIds, []);
+    const defaultFactionIds = Array.isArray(savedFactionIds) && savedFactionIds.length
+      ? savedFactionIds : DEFAULT_ALLIANCE_FACTION_IDS;
+    return new Promise((resolve, reject) => {
+      global.document.getElementById('tehe-config-overlay')?.remove();
+      const overlay = global.document.createElement('div');
+      overlay.id = 'tehe-config-overlay';
+      overlay.setAttribute('role', 'dialog');
+      overlay.setAttribute('aria-modal', 'true');
+      overlay.innerHTML = `<form data-config-form style="display:block;width:min(92vw,430px);max-height:90vh;overflow:auto;padding:16px;box-sizing:border-box;background:#202225;color:#f2f3f5;border:1px solid #555b64;border-radius:9px;box-shadow:0 14px 45px #000;font-family:Arial,sans-serif;">
+  <div style="font-size:17px;font-weight:800;line-height:1.3;">Confirm ${kind === 'newsletter' ? 'HTML' : kind === 'discord' ? 'Discord' : kind === 'master' ? 'Master Elim' : 'Full Faction'} Export</div>
+  <div style="margin-top:6px;color:#b8bdc5;font-size:12px;line-height:1.45;">Review the API key and faction scope before any lookup begins.</div>
+  ${pdaKeyAvailable ? `<label style="display:block;margin-top:14px;color:#dadddf;font-size:12px;font-weight:700;">API key source
+    <select data-key-source style="display:block;width:100%;margin-top:5px;padding:9px;box-sizing:border-box;background:#111318;color:#ffffff;border:1px solid #666d78;border-radius:5px;font:13px Arial,sans-serif;">
+      <option value="pda">TornPDA injected key</option>
+      <option value="custom">Saved/custom key</option>
+    </select>
+  </label>` : ''}
+  <label style="display:block;margin-top:14px;color:#dadddf;font-size:12px;font-weight:700;">Torn public API key
+    <input data-api-key type="password" autocomplete="off" value="${escapeHtml(savedKey)}" placeholder="${pdaKeyAvailable ? 'Used only when saved/custom key is selected' : 'Enter a public Torn API key'}" style="display:block;width:100%;margin-top:5px;padding:9px;box-sizing:border-box;background:#111318;color:#ffffff;border:1px solid #666d78;border-radius:5px;font:13px Arial,sans-serif;">
+  </label>
+  <label style="display:block;margin-top:12px;color:#dadddf;font-size:12px;font-weight:700;">Faction IDs
+    <input data-faction-ids type="text" inputmode="numeric" value="${escapeHtml(defaultFactionIds.join(', '))}" placeholder="8317, 44817" style="display:block;width:100%;margin-top:5px;padding:9px;box-sizing:border-box;background:#111318;color:#ffffff;border:1px solid #666d78;border-radius:5px;font:13px Arial,sans-serif;">
+  </label>
+  <div style="margin-top:5px;color:#9fa5ae;font-size:11px;line-height:1.4;">Use one ID for a single faction or comma-separated IDs for an alliance. A newly entered key replaces the saved key.</div>
+  <div data-config-error hidden style="margin-top:10px;padding:8px;background:#3a171d;color:#ff8998;border:1px solid #7d303c;border-radius:4px;font-size:12px;"></div>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:15px;">
+    <button type="submit" style="padding:8px 13px;box-sizing:border-box;background:#287c4d;color:#ffffff;border:1px solid #4bb878;border-radius:5px;font-weight:700;cursor:pointer;">Confirm &amp; Load</button>
+    <button type="button" data-config-cancel style="padding:8px 13px;box-sizing:border-box;background:#34383f;color:#f2f3f5;border:1px solid #5a606a;border-radius:5px;font-weight:700;cursor:pointer;">Cancel</button>
+  </div>
+</form>`;
+      Object.assign(overlay.style, {
+        position: 'fixed', inset: '0', zIndex: '2147483647', padding: '12px', boxSizing: 'border-box',
+        background: '#000c', display: 'grid', placeItems: 'center',
+      });
+      global.document.body.appendChild(overlay);
+      const form = overlay.querySelector('[data-config-form]');
+      const keySource = overlay.querySelector('[data-key-source]');
+      const keyInput = overlay.querySelector('[data-api-key]');
+      const factionInput = overlay.querySelector('[data-faction-ids]');
+      const error = overlay.querySelector('[data-config-error]');
+      const cancel = () => {
+        overlay.remove();
+        reject(new Error('Export cancelled.'));
+      };
+      overlay.querySelector('[data-config-cancel]').addEventListener('click', cancel);
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const enteredKey = String(keyInput.value || '').trim();
+        const usePdaKey = pdaKeyAvailable && (!keySource || keySource.value === 'pda');
+        const apiKey = usePdaKey ? PDA_API_KEY : enteredKey || savedKey;
+        const factionIds = parseFactionIds(factionInput.value, null);
+        if (!isUsableKey(apiKey) || !factionIds.length) {
+          error.hidden = false;
+          error.textContent = !isUsableKey(apiKey)
+            ? 'Enter a valid public Torn API key.' : 'Enter at least one valid Torn faction ID.';
+          return;
+        }
+        if (!usePdaKey && enteredKey) await storageSet(STORAGE.apiKey, enteredKey);
+        await storageSet(STORAGE.factionIds, factionIds);
+        overlay.remove();
+        resolve({ apiKey, factionIds, scopeKey: factionIds.slice().sort((a, b) => a - b).join(':') });
+      });
+      keyInput.focus();
+    });
+  }
+
   function createProgressDialog(kind) {
+    const jsonExport = kind === 'leaderboard' || kind === 'master';
     global.document.getElementById('tehe-progress-overlay')?.remove();
     const overlay = global.document.createElement('div');
     overlay.id = 'tehe-progress-overlay';
@@ -1639,7 +1966,7 @@ ${body}
     overlay.setAttribute('aria-modal', 'true');
     overlay.setAttribute('aria-labelledby', 'tehe-progress-title');
     overlay.innerHTML = `<div style="display:block;width:min(92vw,460px);max-height:90vh;overflow:auto;box-sizing:border-box;padding:16px;background:#202225;color:#f2f3f5;border:1px solid #555b64;border-radius:9px;box-shadow:0 14px 45px #000;font-family:Arial,sans-serif;">
-  <div id="tehe-progress-title" style="font-size:16px;font-weight:700;line-height:1.35;overflow-wrap:anywhere;">Preparing ${kind === 'discord' ? 'Discord' : kind === 'leaderboard' ? 'Full Faction JSON' : 'Torn HTML'} Export</div>
+  <div id="tehe-progress-title" style="font-size:16px;font-weight:700;line-height:1.35;overflow-wrap:anywhere;">Preparing ${kind === 'discord' ? 'Discord' : kind === 'leaderboard' ? 'Full Faction JSON' : kind === 'master' ? 'Master Elim JSON' : 'Torn HTML'} Export</div>
   <div data-progress-phase style="margin-top:5px;color:#9da3ad;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;">Starting</div>
   <div style="display:flex;justify-content:space-between;gap:8px;margin-top:12px;font-size:12px;"><span data-progress-message>Preparing export…</span><strong data-progress-percent>0%</strong></div>
   <div role="progressbar" aria-label="Export loading progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="display:block;width:100%;height:12px;margin-top:7px;box-sizing:border-box;overflow:hidden;background:#111318;border:1px solid #454a52;border-radius:7px;">
@@ -1657,7 +1984,7 @@ ${body}
       <select data-message-picker style="display:block;width:100%;margin-top:4px;padding:7px;box-sizing:border-box;background:#151619;color:#f2f3f5;border:1px solid #555b64;border-radius:4px;"></select>
     </label>
     <textarea data-output-preview readonly aria-label="Generated export preview" style="display:block;width:100%;height:130px;margin-top:9px;padding:8px;box-sizing:border-box;resize:vertical;background:#0f1012;color:#e8e9eb;border:1px solid #555b64;border-radius:4px;font:11px/1.4 monospace;white-space:pre-wrap;"></textarea>
-    <button type="button" data-export-action style="display:inline-block;margin-top:10px;padding:8px 12px;box-sizing:border-box;background:#287c4d;color:#ffffff;border:1px solid #4bb878;border-radius:5px;font-weight:700;cursor:pointer;">${kind === 'leaderboard' ? 'Download JSON File' : 'Copy to Clipboard'}</button>
+    <button type="button" data-export-action style="display:inline-block;margin-top:10px;padding:8px 12px;box-sizing:border-box;background:#287c4d;color:#ffffff;border:1px solid #4bb878;border-radius:5px;font-weight:700;cursor:pointer;">${jsonExport ? 'Download JSON File' : 'Copy to Clipboard'}</button>
   </div>
   <button type="button" data-close-progress hidden style="display:inline-block;margin:10px 0 0 7px;padding:8px 12px;box-sizing:border-box;background:#34383f;color:#f2f3f5;border:1px solid #5a606a;border-radius:5px;font-weight:700;cursor:pointer;">Close</button>
 </div>`;
@@ -1727,10 +2054,14 @@ ${body}
       displaySelectedExport();
       output.hidden = false;
       closeButton.hidden = false;
-      update({ phase: 'complete', message: kind === 'leaderboard'
+      update({ phase: 'complete', message: jsonExport
         ? 'JSON export generated. Review it below, then download when ready.'
-        : 'Export generated. Review it below, then copy when ready.', percent: 100 });
-      outputSummary.textContent = kind === 'leaderboard'
+        : 'Export generated. Review it below, then copy when ready.',
+      percent: 100,
+      apiCompleted: current.apiTotal ?? current.apiCompleted,
+      membersCompleted: current.membersTotal ?? current.membersCompleted,
+      chunksCompleted: current.chunksTotal ?? current.chunksCompleted });
+      outputSummary.textContent = jsonExport
         ? `JSON file ready: ${exportFilename}. Nothing has been downloaded yet.`
         : exportItems.length > 1
         ? `${exportItems.length} Discord messages are ready. Select and copy each one in order.`
@@ -1748,7 +2079,7 @@ ${body}
     picker.addEventListener('change', displaySelectedExport);
     actionButton.addEventListener('click', async () => {
       const index = selectedExportIndex();
-      if (kind === 'leaderboard') {
+      if (jsonExport) {
         if (downloadJsonFile(exportItems[index] || '', exportFilename)) {
           outputSummary.textContent = `Downloaded ${exportFilename}. The generated JSON remains available here for another download.`;
           outputSummary.style.color = '#55d98a';
@@ -1789,23 +2120,27 @@ ${body}
   const getExportSnapshot = createSnapshotProvider({
     loadCache: () => storageGet(STORAGE.snapshot, null),
     saveCache: (entry) => storageSet(STORAGE.snapshot, entry),
-    fetchSnapshot: async (onProgress) => {
+    fetchSnapshot: async (context) => {
+      const { onProgress, apiKey, factionIds } = context;
       onProgress({ phase: 'preparing', message: 'Checking for authoritative saved rankings…', percent: 1 });
       const sharedSnapshot = await requestSharedExportSnapshot(onProgress);
-      if (sharedSnapshot) {
+      const requestedScope = factionIds.slice().sort((a, b) => a - b).join(':');
+      const sharedScope = (sharedSnapshot?.factions || []).map((faction) => faction.id)
+        .sort((a, b) => a - b).join(':');
+      if (sharedSnapshot && sharedScope === requestedScope) {
         await persistSharedSnapshot(sharedSnapshot);
-        return sharedSnapshot;
+        onProgress({ phase: 'preparing', message: 'Imported persistent rankings history; validating it against fresh faction rosters and Torn team data…', percent: 2 });
       }
-      onProgress({ phase: 'preparing', message: 'Shared rankings are unavailable; checking exporter API access and settings…', percent: 2 });
-      const apiKey = await resolveApiKey();
-      const factionIds = await resolveFactionScope(apiKey, onProgress);
-      return collectSnapshot(apiKey, factionIds, onProgress, { apiOffset: 1 });
+      if (!sharedSnapshot || sharedScope !== requestedScope) {
+        onProgress({ phase: 'preparing', message: 'Shared rankings are unavailable for this scope; loading fresh faction rosters and Torn team data…', percent: 2 });
+      }
+      return collectSnapshot(apiKey, factionIds, onProgress);
     },
-    onCacheHit: (entry, now, onProgress) => {
+    onCacheHit: (entry, now, context) => {
       const secondsRemaining = Math.max(1, Math.ceil((SNAPSHOT_CACHE_MAX_AGE_MS - (now - entry.cachedAt)) / 1000));
-      const membersTotal = entry.snapshot.players.length;
+      const membersTotal = entry.snapshot.rosterMembers.length;
       const chunksTotal = Math.ceil(membersTotal / MEMBER_PROGRESS_CHUNK_SIZE);
-      onProgress({
+      context.onProgress({
         phase: 'cache',
         message: `Using cached live data; a fresh API lookup is required in ${secondsRemaining} seconds.`,
         percent: 95,
@@ -1823,14 +2158,22 @@ ${body}
   });
 
   async function runExport(kind, buttons) {
-    const progressDialog = createProgressDialog(kind);
     buttons.forEach((button) => { button.disabled = true; });
+    let config;
+    try {
+      config = await configureExport(kind);
+    } catch (error) {
+      buttons.forEach((button) => { button.disabled = false; });
+      setStatus(error?.message || 'Export cancelled.');
+      return;
+    }
+    const progressDialog = createProgressDialog(kind);
     try {
       setStatus('Preparing export…');
-      const snapshot = await getExportSnapshot((progress) => {
+      const snapshot = await getExportSnapshot({ ...config, onProgress: (progress) => {
         progressDialog.update(progress);
         setStatus(typeof progress === 'string' ? progress : progress.message);
-      });
+      } });
       progressDialog.update({ phase: 'rendering', message: 'Applying the approved styling and formatting…', percent: 99 });
       if (kind === 'discord') {
         const messages = buildDiscordMessages(snapshot);
@@ -1839,9 +2182,11 @@ ${body}
         progressDialog.completeWithExport(messages);
         setStatus(`${messages.length} Discord message${messages.length === 1 ? '' : 's'} ready to copy.`, 'success');
       } else {
-        const isJson = kind === 'leaderboard';
-        const payload = isJson ? buildFactionJson(snapshot) : buildNewsletterHtml(snapshot);
-        const filename = isJson ? factionJsonFilename(snapshot) : '';
+        const isJson = kind === 'leaderboard' || kind === 'master';
+        const payload = kind === 'leaderboard' ? buildFactionJson(snapshot)
+          : kind === 'master' ? buildMasterElimJson(snapshot) : buildNewsletterHtml(snapshot);
+        const filename = kind === 'leaderboard' ? factionJsonFilename(snapshot)
+          : kind === 'master' ? masterJsonFilename() : '';
         const savedExports = readHistory(await storageGet(STORAGE.exports, {}));
         await storageSet(STORAGE.exports, { ...savedExports, [kind]: {
           generatedAt: new Date().toISOString(),
@@ -1850,7 +2195,8 @@ ${body}
           payload,
         } });
         progressDialog.completeWithExport(payload, { filename });
-        setStatus(isJson ? 'Full faction JSON ready to download.' : 'Torn HTML ready to copy.', 'success');
+        setStatus(kind === 'master' ? 'Master Elimination index ready to download.'
+          : isJson ? 'Full faction JSON ready to download.' : 'Torn HTML ready to copy.', 'success');
       }
     } catch (error) {
       const errorMessage = error?.message || 'Export failed.';
@@ -1881,17 +2227,13 @@ ${body}
     const panel = global.document.createElement('span');
     panel.id = 'tehe-export-controls';
     panel.setAttribute('aria-label', 'Elimination exports');
-    panel.innerHTML = `<style>
-  #tehe-export-controls{display:inline-flex;flex-wrap:wrap;gap:4px;align-items:center;max-width:100%;margin-left:8px;box-sizing:border-box;vertical-align:middle;font:11px Arial,sans-serif}
-  #tehe-export-controls button{display:inline-block;width:auto;min-height:24px;margin:0;padding:3px 7px;box-sizing:border-box;border:1px solid #666b73;border-radius:4px;background:#30343a;color:#f7f7f7;font:700 10px/1.25 Arial,sans-serif;white-space:nowrap;cursor:pointer}
-  #tehe-export-controls button:hover{background:#3a4048;border-color:#9299a3}
-  #tehe-export-controls button:disabled{opacity:.55;cursor:wait}
-  #tehe-export-status{display:inline-block;max-width:100%;margin-left:3px;color:#9da3ad;font:10px/1.25 Arial,sans-serif;white-space:normal}
-</style>
-<button type="button" data-export="newsletter" title="${escapeHtml(BUTTON_LABELS.newsletter)}" aria-label="${escapeHtml(BUTTON_LABELS.newsletter)}">HTML Export</button>
-<button type="button" data-export="discord" title="${escapeHtml(BUTTON_LABELS.discord)}" aria-label="${escapeHtml(BUTTON_LABELS.discord)}">Discord Export</button>
-<button type="button" data-export="leaderboard" title="${escapeHtml(BUTTON_LABELS.leaderboard)}" aria-label="${escapeHtml(BUTTON_LABELS.leaderboard)}">Full Faction Export</button>
-<span id="tehe-export-status" role="status">Ready.</span>`;
+    panel.setAttribute('style', 'display:inline-flex;flex-wrap:wrap;gap:4px;align-items:center;max-width:100%;margin-left:8px;box-sizing:border-box;vertical-align:middle;font:11px Arial,sans-serif;white-space:normal;');
+    const buttonStyle = 'display:inline-block;width:auto;min-height:24px;margin:0;padding:3px 6px;box-sizing:border-box;border:1px solid #666b73;border-radius:4px;background:#30343a;color:#f7f7f7;font:700 10px/1.25 Arial,sans-serif;white-space:nowrap;cursor:pointer;';
+    panel.innerHTML = `<button type="button" data-export="newsletter" style="${buttonStyle}" title="${escapeHtml(BUTTON_LABELS.newsletter)}" aria-label="${escapeHtml(BUTTON_LABELS.newsletter)}">HTML Export</button>
+<button type="button" data-export="discord" style="${buttonStyle}" title="${escapeHtml(BUTTON_LABELS.discord)}" aria-label="${escapeHtml(BUTTON_LABELS.discord)}">Discord Export</button>
+<button type="button" data-export="leaderboard" style="${buttonStyle}" title="${escapeHtml(BUTTON_LABELS.leaderboard)}" aria-label="${escapeHtml(BUTTON_LABELS.leaderboard)}">Full Faction Export</button>
+<button type="button" data-export="master" style="${buttonStyle}" title="${escapeHtml(BUTTON_LABELS.master)}" aria-label="${escapeHtml(BUTTON_LABELS.master)}">Master Elim Export</button>
+<span id="tehe-export-status" role="status" style="display:inline-block;max-width:100%;margin-left:3px;color:#9da3ad;font:10px/1.25 Arial,sans-serif;white-space:normal;">Ready.</span>`;
     const buttons = [...panel.querySelectorAll('button[data-export]')];
     buttons.forEach((button) => button.addEventListener('click', () => runExport(button.dataset.export, buttons)));
     header.appendChild(panel);
@@ -1909,6 +2251,7 @@ ${body}
     REQUESTS_PER_MINUTE,
     REQUEST_START_INTERVAL_MS,
     MAX_CONCURRENT_REQUESTS,
+    TOTAL_ELIMINATION_TEAMS,
     BUTTON_LABELS,
     TEAM_STYLES,
     STORAGE,
@@ -1930,7 +2273,9 @@ ${body}
     buildNewsletterHtml,
     buildDiscordMessages,
     buildFactionJson,
+    buildMasterElimJson,
     factionJsonFilename,
+    masterJsonFilename,
     downloadJsonFile,
     parseFactionIds,
     readHistory,
@@ -1941,9 +2286,16 @@ ${body}
     requestSharedExportSnapshot,
     seedParticipantLedger,
     readParticipantLedger,
+    readMasterIndex,
+    updateMasterIndex,
     serializeParticipantLedger,
     participantLookupPlan,
     frozenParticipantRecord,
+    normalizeEliminationTeam,
+    indexEliminationTeamMembers,
+    exportTeamRecord,
+    exportMemberRecord,
+    teamPlacement,
     serializeHistory,
     roastPlayer,
     packDiscordBlocks,
@@ -1951,6 +2303,7 @@ ${body}
     isSnapshotCacheFresh,
     createSnapshotProvider,
     pacedMap,
+    isUsableKey,
   });
 
   if (typeof module !== 'undefined' && module.exports) module.exports = core;

@@ -1,28 +1,29 @@
 # Torn Elimination HTML Exporter
 
-A standalone userscript for desktop userscript managers and TornPDA. It produces Torn HTML newsletters, three-part Discord updates, and full faction JSON data files. When **Torn Elimination Faction Rankings** is installed on the same Torn browser/TornPDA profile, the exporter automatically reuses its authoritative participant, dropout, attack, and rank snapshot. It retains its own API-backed fallback when the rankings script is unavailable.
+A standalone userscript for desktop userscript managers and TornPDA. It produces Torn HTML newsletters, three-part Discord updates, complete current-faction JSON files, and a persistent master Elimination index. When **Torn Elimination Faction Rankings** is installed on the same Torn browser/TornPDA profile, the exporter imports its participant, dropout, attack, and rank history, then verifies the current roster and live event state through Torn's API.
 
 The exporter uses the finalized Torn Forum/Newsletter and native Discord layouts as its output templates.
 
-Alliance, faction, and team placements are ranked by Elimination attacks. The script cross-checks every participant against the live `/torn/elimination` standings: a confirmed participant on a surviving team remains active, a participant whose enrollment disappears is dropped, and every member of an eliminated team is dropped. Ordinary faction members who never enrolled are excluded from every export.
+Alliance, faction, and team placements are ranked by Elimination attacks. The script uses each user's `Team` field—not the consistently null `team_id` field—to determine enrollment. A member whose initial team was one of the twelve Elimination teams and whose current team becomes `Unknown` is permanently classified as **Dropped Out**. Members who were never enrolled remain separately classified as **Not Participating**. The Full Faction JSON includes both groups so no current faction member is omitted; the styled HTML and Discord updates include only active participants and confirmed dropouts.
 
 ## What it adds
 
-Three compact export actions appear directly beside the **Elimination** page heading:
+Four compact export actions appear directly beside the **Elimination** page heading:
 
 1. **Export Torn HTML — Elimination Alliance Update (Top Performers, Team Styling & Dropout Roast)**
 2. **Export Discord Markdown — Elimination Alliance Update (Three Mobile-Safe Messages with Team Icons & Dropout Roast)**
 3. **Export JSON File — Full Faction Elimination Rankings (Current Faction; Alliance/Additional Factions Optional)**
+4. **Export Master Elimination JSON — Entire Persistent Index with Team Placements, Initial Teams & Final Attacks**
 
-Selecting an export opens a progress dialog with a live completion bar, percentage, API-request count, member count, and ten-member progress-chunk count. When generation reaches 100%, the same dialog keeps a selectable preview open. Torn HTML and Discord exports reveal an explicit **Copy to Clipboard** button; the Full Faction export reveals **Download JSON File**. Nothing is copied or downloaded automatically. Discord messages can be selected and copied individually, while the generated JSON remains available for repeated downloads until the dialog is closed.
+Selecting any export first opens a confirmation dialog. It allows the user to choose a TornPDA-injected key when available, enter or replace a desktop API key, and configure one or more faction IDs. After confirmation, a progress dialog reports a live completion bar, percentage, API-request count, member count, and ten-member progress-chunk count. It cannot display 100% until all scheduled API requests, members, and chunks reconcile. When generation finishes, the same dialog keeps a selectable preview open. Torn HTML and Discord exports reveal an explicit **Copy to Clipboard** button; both JSON exports reveal **Download JSON File**. Nothing is copied or downloaded automatically.
 
-All three export actions share the same complete data snapshot for up to five minutes. The preferred source is the companion rankings script's persistent snapshot; the exporter requests one refresh there and imports the result into its own durable cache. The other formats can then be generated immediately without repeating faction or member lookups. The cache survives a page reload, and simultaneous requests share one in-progress lookup. Once the snapshot reaches five minutes old, the next export must obtain fresh data before generating output.
+All four export actions share the same complete data snapshot for up to five minutes. The cache is keyed by faction scope, survives a page reload, and deduplicates an in-progress lookup. A companion-rankings snapshot is imported as historical context, while each expired cache refresh still verifies the selected factions' complete live rosters and Elimination state. Other formats generated within five minutes reuse the same snapshot without repeating lookups.
 
 Version 1.7.0 started a clean exporter participant/rank cache so terminal states produced by older exporter releases cannot contaminate the authoritative rankings import. Saved API and faction settings remain intact.
 
-Version 1.8.0 changes Full Faction Export from an HTML leaderboard into a structured JSON file. The completed progress window keeps the JSON available and downloads it only when **Download JSON File** is explicitly selected.
+Version 1.9.0 makes Full Faction JSON roster-complete, adds Master Elim Export, uses the competition `Team` field for classification, records twelve-team placements and detail snapshots, skips invalid detail calls for zero-life teams, adds per-export configuration, supports TornPDA-injected keys, fixes TornPDA's inline-button rendering, and prevents incomplete counters from being reported as 100%.
 
-A separate persistent participant ledger is seeded with the 63 supplied Naughty Souls/Sanctuary participants: 55 active and eight confirmed dropouts. It preserves the highest confirmed attack count so Torn cannot erase historical dropout results. Once a participant is confirmed dropped, that state is terminal: the script never calls that member's competition endpoint again and only recalculates their alliance/faction ranks. Unseeded faction scopes receive a roster discovery pass, after which only confirmed participants remain in the ledger.
+A persistent participant ledger is seeded with the supplied Naughty Souls/Sanctuary participant history. It preserves initial team membership and the highest confirmed attack count so Torn cannot erase historical dropout results. Once a participant is confirmed dropped, that state is terminal: the script never calls that member's competition endpoint again and only recalculates their alliance/faction ranks. A separate master index retains current and historical members, initial team snapshots, latest/final attack snapshots, and current team standings across exports.
 
 ## Output templates
 
@@ -43,8 +44,15 @@ A separate persistent participant ledger is seeded with the 63 supplied Naughty 
 ### Full Faction JSON
 
 - Downloads one UTF-8 `.json` file after an explicit click in the completed progress dialog.
-- Includes export metadata, event scope, global team standings, faction summaries, every active participant, and every confirmed dropout.
+- Includes every current member of every selected faction—active, dropped out, and not participating—without silently omitting roster members.
+- Keeps confirmed dropouts separate from members who never participated.
 - Preserves alliance, faction, and team ranks; attacks; movement; former team details; and profile URLs without including API keys.
+
+### Master Elimination JSON
+
+- Downloads the entire durable Elimination index, including historical members no longer present on the current faction rosters.
+- Records each team's two-digit ID, live placement such as `3rd/12th place`, lives, score, and elimination/detail-lookup state.
+- Preserves every participant's initial team snapshot, latest attack snapshot, and terminal final attack snapshot.
 
 ## Install
 
@@ -54,14 +62,14 @@ A separate persistent participant ledger is seeded with the 63 supplied Naughty 
 
 ### TornPDA
 
-Import the `.user.js` file as a userscript. TornPDA replaces the embedded API-key marker automatically and routes API requests through its native HTTP bridge.
+Import the `.user.js` file as a userscript. TornPDA replaces the embedded API-key marker automatically and routes API requests through its native HTTP bridge. When that injected key is present, the confirmation dialog offers **TornPDA injected key** as a credential source and does not reject it as a placeholder.
 
 ## Use
 
-1. Open Torn's Elimination page and select **HTML Export**, **Discord Export**, or **Full Faction Export** beside the page heading.
-2. Confirm the current faction ID or enter multiple comma-separated faction IDs for an alliance-wide export.
-3. Follow the live progress bar while the script reads faction rosters, live team standings, and active/unresolved participant competition records. The dialog reports the percentage, completed/total API requests, members, and ten-member progress chunks, including how many confirmed dropouts were reused without calls. A start-time scheduler targets 90 API calls per minute with up to six requests in flight, leaving headroom beneath Torn's 100-calls-per-minute user limit. Setup calls, faction calls, and member calls all use the same limiter.
-4. At 100%, review the persistent preview. Select **Copy to Clipboard** for Torn HTML/Discord, or **Download JSON File** for the Full Faction export.
+1. Open Torn's Elimination page and select **HTML Export**, **Discord Export**, **Full Faction Export**, or **Master Elim Export** beside the page heading.
+2. In the confirmation dialog, choose the TornPDA-injected or saved/custom API key and confirm one or more comma-separated faction IDs.
+3. Follow the live progress bar while the script reads complete faction rosters, `/torn/elimination`, each surviving team's `/torn/{id}/eliminationteam` record, and active/unresolved members' competition records. A team with zero lives remains recorded from the global standings but its unavailable detail endpoint is skipped. The scheduler targets 90 API calls per minute with up to six requests in flight, leaving headroom beneath Torn's 100-calls-per-minute user limit.
+4. At 100%, review the persistent preview. Select **Copy to Clipboard** for Torn HTML/Discord, or **Download JSON File** for either JSON export.
 5. Paste Torn HTML into the Torn faction newsletter/forum Source Code editor, paste the numbered Discord messages into Discord, or retain/import the downloaded JSON as needed.
 
 The script stores only the entered faction scope, the desktop API key, persistent participant/rank history, generated export payloads, and the latest five-minute snapshot in userscript-local storage. This durable state provides movement indicators, preserves former-team and attack data after dropout, and keeps completed exports available for subsequent updates without poisoning the live participant set. The companion rankings bridge publishes only non-secret event data (participant identity, team, attacks, status, and ranks) to Torn-origin browser storage; API keys never enter that bridge.
