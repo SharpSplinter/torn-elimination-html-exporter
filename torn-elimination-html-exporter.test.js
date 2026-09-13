@@ -57,12 +57,20 @@ const fixture = {
   ],
 };
 
-test('standalone userscript exposes four uniquely labelled export actions', () => {
-  assert.equal(exporter.VERSION, '1.9.0');
+test('standalone userscript exposes one menu with the five exact numbered choices', () => {
+  assert.equal(exporter.VERSION, '1.10.0');
   assert.equal(exporter.STORAGE.snapshot, 'tehe.snapshotCache.v5');
   assert.equal(exporter.STORAGE.participants, 'tehe.participantLedger.v2');
   assert.equal(exporter.STORAGE.masterIndex, 'tehe.masterEliminationIndex.v1');
-  assert.deepEqual(Object.keys(exporter.BUTTON_LABELS), ['newsletter', 'discord', 'leaderboard', 'master']);
+  assert.deepEqual(Object.keys(exporter.BUTTON_LABELS), ['menu', 'newsletter', 'discord', 'leaderboard', 'master']);
+  assert.equal(exporter.BUTTON_LABELS.menu, 'Open Elimination Export Menu');
+  assert.deepEqual(exporter.EXPORT_MENU_OPTIONS.map((option) => option.label), [
+    'Full Faction JSON Export',
+    'Newsletter Export',
+    'Discord Export',
+    'Full Elimination JSON Export',
+    'API Settings',
+  ]);
   assert.match(exporter.BUTTON_LABELS.newsletter, /Elimination Alliance Update/);
   assert.match(exporter.BUTTON_LABELS.discord, /Discord Markdown/);
   assert.match(exporter.BUTTON_LABELS.leaderboard, /Complete Current Faction Rosters.*No Members Omitted/);
@@ -183,13 +191,15 @@ test('userscript runs only on the Torn Elimination page', () => {
   assert.doesNotMatch(source, /^\/\/ @match\s+https:\/\/www\.torn\.com\/\*$/m);
 });
 
-test('export controls are compact inline buttons beside the Elimination heading', () => {
+test('one compact master button beside the heading opens the numbered export menu', () => {
   assert.match(source, /matches\('h1,h2,h3,h4,h5,\[role="heading"\]'\)/);
   assert.match(source, /header\.appendChild\(panel\)/);
-  assert.match(source, />HTML Export<\/button>/);
-  assert.match(source, />Discord Export<\/button>/);
-  assert.match(source, />Full Faction Export<\/button>/);
-  assert.match(source, />Master Elim Export<\/button>/);
+  assert.match(source, /data-export-menu/);
+  assert.match(source, />Export Menu<\/button>/);
+  assert.equal((source.match(/data-export-menu style=/g) || []).length, 1);
+  assert.match(source, /\$\{index \+ 1\}\) \$\{escapeHtml\(option\.label\)\}/);
+  assert.match(source, /Elimination Export Menu/);
+  assert.doesNotMatch(source, /data-export="(?:newsletter|discord|leaderboard|master)"/);
   assert.match(source, /panel\.setAttribute\('style', 'display:inline-flex/);
   assert.doesNotMatch(source, /panel\.innerHTML = `<style>/);
   assert.doesNotMatch(source, /#tehe-export-panel\{position:fixed/);
@@ -203,7 +213,7 @@ test('each export opens detailed progress first and requires an explicit complet
   assert.match(source, /Members: discovering/);
   assert.match(source, /Chunks: discovering/);
   assert.match(source, /MEMBER_PROGRESS_CHUNK_SIZE = 10/);
-  assert.match(source, /jsonExport \? 'Download JSON File' : 'Copy to Clipboard'/);
+  assert.match(source, /jsonExport \? 'Share JSON File' : 'Copy to Clipboard'/);
   assert.match(source, /Export ready\. Nothing has been copied yet\./);
   assert.match(source, /picker\.addEventListener\('change', displaySelectedExport\)/);
   assert.match(source, /actionButton\.addEventListener\('click', async \(\) =>/);
@@ -211,7 +221,12 @@ test('each export opens detailed progress first and requires an explicit complet
   assert.doesNotMatch(source, /await deliver(?:Html|Discord)\(/);
 });
 
-test('HTML and Discord use clipboard while Full Faction uses a JSON file download', () => {
+test('JSON exports use Android file sharing with a desktop download fallback', () => {
+  assert.match(source, /async function shareJsonFile\(/);
+  assert.match(source, /new global\.File\(\[content\], filename/);
+  assert.match(source, /navigator\.canShare\(\{ files: \[file\] \}\)/);
+  assert.match(source, /await navigator\.share\(shareData\)/);
+  assert.match(source, /error\?\.name === 'AbortError'/);
   assert.match(source, /function downloadJsonFile\(/);
   assert.match(source, /application\/json;charset=utf-8/);
   assert.match(source, /createObjectURL/);
@@ -219,6 +234,41 @@ test('HTML and Discord use clipboard while Full Faction uses a JSON file downloa
   assert.match(source, /GM_setClipboard/);
   assert.match(source, /navigator\?\.clipboard\?\.writeText/);
   assert.doesNotMatch(source, /downloadHtml/);
+});
+
+test('Android sharing sends JSON as a file and cancellation never triggers a download', async () => {
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const fileDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'File');
+  const shared = [];
+  class MockFile {
+    constructor(parts, name, options) {
+      this.parts = parts;
+      this.name = name;
+      this.type = options.type;
+    }
+  }
+  try {
+    Object.defineProperty(globalThis, 'File', { configurable: true, value: MockFile });
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
+      canShare: ({ files }) => files[0] instanceof MockFile,
+      share: async (payload) => { shared.push(payload); },
+    } });
+    assert.equal(await exporter.shareJsonFile('{"ok":true}', 'elim.json'), 'shared');
+    assert.equal(shared[0].files[0].name, 'elim.json');
+    assert.equal(shared[0].files[0].type, 'application/json;charset=utf-8');
+
+    globalThis.navigator.share = async () => {
+      const error = new Error('cancelled');
+      error.name = 'AbortError';
+      throw error;
+    };
+    assert.equal(await exporter.shareJsonFile('{}', 'cancelled.json'), 'cancelled');
+  } finally {
+    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor);
+    else delete globalThis.navigator;
+    if (fileDescriptor) Object.defineProperty(globalThis, 'File', fileDescriptor);
+    else delete globalThis.File;
+  }
 });
 
 test('team mapping returns the agreed symbol and player-name color', () => {
@@ -297,7 +347,7 @@ test('full faction JSON contains every current roster member and separates nonpa
   const payload = JSON.parse(json);
   assert.equal(payload.schemaVersion, 2);
   assert.equal(payload.exportType, 'torn-elimination-full-faction-rosters');
-  assert.equal(payload.exporterVersion, '1.9.0');
+  assert.equal(payload.exporterVersion, '1.10.0');
   assert.equal(payload.summary.factionCount, 2);
   assert.equal(payload.summary.memberCount, 22);
   assert.equal(payload.summary.participantCount, 20);
@@ -425,13 +475,16 @@ test('master index persists initial teams, terminal attacks, current rosters, an
   assert.equal(payload.teams[0].placement, '1st/12th place');
 });
 
-test('TornPDA injected keys are accepted and preflight settings are required before progress', () => {
+test('TornPDA injected keys are accepted and API fields live only in menu option five', () => {
   assert.equal(exporter.isUsableKey('###PDA-APIKEY###'), false);
   assert.equal(exporter.isUsableKey('injected-public-key-123'), true);
   assert.match(source, /TornPDA injected key/);
   assert.match(source, /data-key-source/);
-  assert.match(source, /config = await configureExport\(kind\)/);
-  assert.ok(source.indexOf('config = await configureExport(kind)') < source.indexOf('const progressDialog = createProgressDialog(kind)'));
+  assert.match(source, /function configureApiSettings\(\)/);
+  assert.match(source, /Choose the API-key source and faction scope used by all four exports/);
+  assert.match(source, /kind === 'settings'/);
+  assert.match(source, /config = await loadExportConfig\(\)/);
+  assert.doesNotMatch(source, /configureExport\(kind\)/);
 });
 
 test('completion reconciles API, member, and chunk counters before displaying 100 percent', () => {

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Elimination HTML Exporter
 // @namespace    https://github.com/SharpSplinter/torn-elimination-html-exporter
-// @version      1.9.0
-// @description  Export Torn HTML, Discord updates, complete faction rosters, and the persistent Elimination master index.
+// @version      1.10.0
+// @description  Export Torn newsletters, Discord updates, complete faction rosters, and the persistent Elimination master index.
 // @author       SharpSplinter
 // @homepageURL  https://github.com/SharpSplinter/torn-elimination-html-exporter
 // @supportURL   https://github.com/SharpSplinter/torn-elimination-html-exporter/issues
@@ -20,10 +20,11 @@
 (function eliminationHtmlExporter(global) {
   'use strict';
 
-  const VERSION = '1.9.0';
+  const VERSION = '1.10.0';
   const API_BASE = 'https://api.torn.com/v2';
   const PDA_API_KEY = '###PDA-APIKEY###';
   const BUTTON_LABELS = Object.freeze({
+    menu: 'Open Elimination Export Menu',
     newsletter: 'Export Torn HTML — Elimination Alliance Update (Top Performers, Team Styling & Dropout Roast)',
     discord: 'Export Discord Markdown — Elimination Alliance Update (Three Mobile-Safe Messages with Team Icons & Dropout Roast)',
     leaderboard: 'Export JSON File — Complete Current Faction Rosters with Elimination Status (No Members Omitted)',
@@ -31,6 +32,7 @@
   });
   const STORAGE = Object.freeze({
     apiKey: 'tehe.apiKey',
+    keySource: 'tehe.keySource',
     factionIds: 'tehe.factionIds',
     history: 'tehe.rankHistory.v4',
     snapshot: 'tehe.snapshotCache.v5',
@@ -38,6 +40,13 @@
     masterIndex: 'tehe.masterEliminationIndex.v1',
     exports: 'tehe.generatedExports.v1',
   });
+  const EXPORT_MENU_OPTIONS = Object.freeze([
+    Object.freeze({ kind: 'leaderboard', label: 'Full Faction JSON Export' }),
+    Object.freeze({ kind: 'newsletter', label: 'Newsletter Export' }),
+    Object.freeze({ kind: 'discord', label: 'Discord Export' }),
+    Object.freeze({ kind: 'master', label: 'Full Elimination JSON Export' }),
+    Object.freeze({ kind: 'settings', label: 'API Settings' }),
+  ]);
   const SHARED_EXPORT = Object.freeze({
     snapshot: 'tefr.sharedEliminationSnapshot.v1',
     progress: 'tefr.sharedEliminationProgress.v1',
@@ -901,6 +910,27 @@ ${body}
     } catch { return false; }
   }
 
+  async function shareJsonFile(content, filename) {
+    const navigator = global.navigator;
+    if (typeof global.File === 'function' && typeof navigator?.share === 'function') {
+      const file = new global.File([content], filename, { type: 'application/json;charset=utf-8' });
+      const shareData = { title: filename, text: 'Torn Elimination JSON export', files: [file] };
+      let supportsFileSharing = typeof navigator.canShare !== 'function';
+      if (typeof navigator.canShare === 'function') {
+        try { supportsFileSharing = navigator.canShare({ files: [file] }); } catch { supportsFileSharing = false; }
+      }
+      if (supportsFileSharing) {
+        try {
+          await navigator.share(shareData);
+          return 'shared';
+        } catch (error) {
+          if (error?.name === 'AbortError') return 'cancelled';
+        }
+      }
+    }
+    return downloadJsonFile(content, filename) ? 'downloaded' : 'failed';
+  }
+
   function discordMovement(player) {
     if (player.movement > 0) return ` 🟢 **▲${player.movement}**`;
     if (player.movement < 0) return ` 🔻 **▼${Math.abs(player.movement)}**`;
@@ -1590,12 +1620,6 @@ ${body}
     })));
   }
 
-  async function currentFactionId(apiKey) {
-    const payload = await apiGet('/user/faction?striptags=true', apiKey);
-    const source = unwrap(payload, 'faction') || {};
-    return toNumber(source.id ?? source.ID, null);
-  }
-
   function completedProgressChunks(completed, total, chunkSize = MEMBER_PROGRESS_CHUNK_SIZE) {
     if (!total) return 0;
     const totalChunks = Math.ceil(total / chunkSize);
@@ -1812,59 +1836,6 @@ ${body}
     return Boolean(key && key !== placeholder && key.length >= 10);
   }
 
-  async function resolveApiKey() {
-    if (isUsableKey(PDA_API_KEY)) return PDA_API_KEY;
-    const saved = String(await storageGet(STORAGE.apiKey, '') || '').trim();
-    if (isUsableKey(saved)) return saved;
-    const supplied = String(global.prompt('Enter a public Torn API key. It is stored only in this userscript\'s local storage:', '') || '').trim();
-    if (!isUsableKey(supplied)) throw new Error('A valid Torn API key is required.');
-    await storageSet(STORAGE.apiKey, supplied);
-    return supplied;
-  }
-
-  async function resolveFactionScope(apiKey, onProgress = () => {}) {
-    onProgress({
-      phase: 'scope',
-      message: 'Loading your current faction before choosing the export scope…',
-      percent: 3,
-      apiStarted: 1,
-      apiCompleted: 0,
-      apiTotal: 1,
-      membersCompleted: 0,
-      membersTotal: null,
-      chunksCompleted: 0,
-      chunksTotal: null,
-    });
-    const currentId = await currentFactionId(apiKey);
-    onProgress({
-      phase: 'scope',
-      message: 'Current faction loaded. Confirm the faction or alliance scope.',
-      percent: 5,
-      apiStarted: 1,
-      apiCompleted: 1,
-      apiTotal: 1,
-      membersCompleted: 0,
-      membersTotal: null,
-      chunksCompleted: 0,
-      chunksTotal: null,
-    });
-    const saved = await storageGet(STORAGE.factionIds, []);
-    const defaults = Array.isArray(saved) && saved.length
-      ? saved
-      : DEFAULT_ALLIANCE_FACTION_IDS.includes(currentId)
-        ? DEFAULT_ALLIANCE_FACTION_IDS
-        : currentId ? [currentId] : [];
-    const supplied = global.prompt(
-      'Faction scope: enter one or more Torn faction IDs separated by commas. Leave the current faction ID alone for a single-faction export; add allied faction IDs for an alliance export.',
-      defaults.join(', '),
-    );
-    if (supplied === null) throw new Error('Export cancelled.');
-    const factionIds = parseFactionIds(supplied, currentId);
-    if (!factionIds.length) throw new Error('No valid faction IDs were supplied.');
-    await storageSet(STORAGE.factionIds, factionIds);
-    return factionIds;
-  }
-
   async function copyText(value) {
     try {
       if (typeof GM_setClipboard === 'function') {
@@ -1887,9 +1858,25 @@ ${body}
     } catch { return false; }
   }
 
-  async function configureExport(kind) {
+  async function loadExportConfig() {
     const savedKey = String(await storageGet(STORAGE.apiKey, '') || '').trim();
     const pdaKeyAvailable = isUsableKey(PDA_API_KEY);
+    const preferredSource = String(await storageGet(STORAGE.keySource, pdaKeyAvailable ? 'pda' : 'custom'));
+    const usePdaKey = pdaKeyAvailable && preferredSource !== 'custom';
+    const apiKey = usePdaKey ? PDA_API_KEY : savedKey;
+    const savedFactionIds = await storageGet(STORAGE.factionIds, []);
+    const factionIds = Array.isArray(savedFactionIds) && savedFactionIds.length
+      ? parseFactionIds(savedFactionIds.join(','), null) : [...DEFAULT_ALLIANCE_FACTION_IDS];
+    if (!isUsableKey(apiKey) || !factionIds.length) {
+      throw new Error('Open API Settings from the export menu and save a valid API key and faction scope first.');
+    }
+    return { apiKey, factionIds, scopeKey: factionIds.slice().sort((a, b) => a - b).join(':') };
+  }
+
+  async function configureApiSettings() {
+    const savedKey = String(await storageGet(STORAGE.apiKey, '') || '').trim();
+    const pdaKeyAvailable = isUsableKey(PDA_API_KEY);
+    const savedKeySource = String(await storageGet(STORAGE.keySource, pdaKeyAvailable ? 'pda' : 'custom'));
     const savedFactionIds = await storageGet(STORAGE.factionIds, []);
     const defaultFactionIds = Array.isArray(savedFactionIds) && savedFactionIds.length
       ? savedFactionIds : DEFAULT_ALLIANCE_FACTION_IDS;
@@ -1900,12 +1887,12 @@ ${body}
       overlay.setAttribute('role', 'dialog');
       overlay.setAttribute('aria-modal', 'true');
       overlay.innerHTML = `<form data-config-form style="display:block;width:min(92vw,430px);max-height:90vh;overflow:auto;padding:16px;box-sizing:border-box;background:#202225;color:#f2f3f5;border:1px solid #555b64;border-radius:9px;box-shadow:0 14px 45px #000;font-family:Arial,sans-serif;">
-  <div style="font-size:17px;font-weight:800;line-height:1.3;">Confirm ${kind === 'newsletter' ? 'HTML' : kind === 'discord' ? 'Discord' : kind === 'master' ? 'Master Elim' : 'Full Faction'} Export</div>
-  <div style="margin-top:6px;color:#b8bdc5;font-size:12px;line-height:1.45;">Review the API key and faction scope before any lookup begins.</div>
+  <div style="font-size:17px;font-weight:800;line-height:1.3;">API Settings</div>
+  <div style="margin-top:6px;color:#b8bdc5;font-size:12px;line-height:1.45;">Choose the API-key source and faction scope used by all four exports.</div>
   ${pdaKeyAvailable ? `<label style="display:block;margin-top:14px;color:#dadddf;font-size:12px;font-weight:700;">API key source
     <select data-key-source style="display:block;width:100%;margin-top:5px;padding:9px;box-sizing:border-box;background:#111318;color:#ffffff;border:1px solid #666d78;border-radius:5px;font:13px Arial,sans-serif;">
-      <option value="pda">TornPDA injected key</option>
-      <option value="custom">Saved/custom key</option>
+      <option value="pda"${savedKeySource !== 'custom' ? ' selected' : ''}>TornPDA injected key</option>
+      <option value="custom"${savedKeySource === 'custom' ? ' selected' : ''}>Saved/custom key</option>
     </select>
   </label>` : ''}
   <label style="display:block;margin-top:14px;color:#dadddf;font-size:12px;font-weight:700;">Torn public API key
@@ -1914,10 +1901,10 @@ ${body}
   <label style="display:block;margin-top:12px;color:#dadddf;font-size:12px;font-weight:700;">Faction IDs
     <input data-faction-ids type="text" inputmode="numeric" value="${escapeHtml(defaultFactionIds.join(', '))}" placeholder="8317, 44817" style="display:block;width:100%;margin-top:5px;padding:9px;box-sizing:border-box;background:#111318;color:#ffffff;border:1px solid #666d78;border-radius:5px;font:13px Arial,sans-serif;">
   </label>
-  <div style="margin-top:5px;color:#9fa5ae;font-size:11px;line-height:1.4;">Use one ID for a single faction or comma-separated IDs for an alliance. A newly entered key replaces the saved key.</div>
+  <div style="margin-top:5px;color:#9fa5ae;font-size:11px;line-height:1.4;">Use one ID for a single faction or comma-separated IDs for an alliance. A newly entered custom key replaces the saved custom key.</div>
   <div data-config-error hidden style="margin-top:10px;padding:8px;background:#3a171d;color:#ff8998;border:1px solid #7d303c;border-radius:4px;font-size:12px;"></div>
   <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:15px;">
-    <button type="submit" style="padding:8px 13px;box-sizing:border-box;background:#287c4d;color:#ffffff;border:1px solid #4bb878;border-radius:5px;font-weight:700;cursor:pointer;">Confirm &amp; Load</button>
+    <button type="submit" style="padding:8px 13px;box-sizing:border-box;background:#287c4d;color:#ffffff;border:1px solid #4bb878;border-radius:5px;font-weight:700;cursor:pointer;">Save Settings</button>
     <button type="button" data-config-cancel style="padding:8px 13px;box-sizing:border-box;background:#34383f;color:#f2f3f5;border:1px solid #5a606a;border-radius:5px;font-weight:700;cursor:pointer;">Cancel</button>
   </div>
 </form>`;
@@ -1949,7 +1936,10 @@ ${body}
           return;
         }
         if (!usePdaKey && enteredKey) await storageSet(STORAGE.apiKey, enteredKey);
-        await storageSet(STORAGE.factionIds, factionIds);
+        await Promise.all([
+          storageSet(STORAGE.keySource, usePdaKey ? 'pda' : 'custom'),
+          storageSet(STORAGE.factionIds, factionIds),
+        ]);
         overlay.remove();
         resolve({ apiKey, factionIds, scopeKey: factionIds.slice().sort((a, b) => a - b).join(':') });
       });
@@ -1984,7 +1974,7 @@ ${body}
       <select data-message-picker style="display:block;width:100%;margin-top:4px;padding:7px;box-sizing:border-box;background:#151619;color:#f2f3f5;border:1px solid #555b64;border-radius:4px;"></select>
     </label>
     <textarea data-output-preview readonly aria-label="Generated export preview" style="display:block;width:100%;height:130px;margin-top:9px;padding:8px;box-sizing:border-box;resize:vertical;background:#0f1012;color:#e8e9eb;border:1px solid #555b64;border-radius:4px;font:11px/1.4 monospace;white-space:pre-wrap;"></textarea>
-    <button type="button" data-export-action style="display:inline-block;margin-top:10px;padding:8px 12px;box-sizing:border-box;background:#287c4d;color:#ffffff;border:1px solid #4bb878;border-radius:5px;font-weight:700;cursor:pointer;">${jsonExport ? 'Download JSON File' : 'Copy to Clipboard'}</button>
+    <button type="button" data-export-action style="display:inline-block;margin-top:10px;padding:8px 12px;box-sizing:border-box;background:#287c4d;color:#ffffff;border:1px solid #4bb878;border-radius:5px;font-weight:700;cursor:pointer;">${jsonExport ? 'Share JSON File' : 'Copy to Clipboard'}</button>
   </div>
   <button type="button" data-close-progress hidden style="display:inline-block;margin:10px 0 0 7px;padding:8px 12px;box-sizing:border-box;background:#34383f;color:#f2f3f5;border:1px solid #5a606a;border-radius:5px;font-weight:700;cursor:pointer;">Close</button>
 </div>`;
@@ -2055,14 +2045,14 @@ ${body}
       output.hidden = false;
       closeButton.hidden = false;
       update({ phase: 'complete', message: jsonExport
-        ? 'JSON export generated. Review it below, then download when ready.'
+        ? 'JSON export generated. Review it below, then share when ready.'
         : 'Export generated. Review it below, then copy when ready.',
       percent: 100,
       apiCompleted: current.apiTotal ?? current.apiCompleted,
       membersCompleted: current.membersTotal ?? current.membersCompleted,
       chunksCompleted: current.chunksTotal ?? current.chunksCompleted });
       outputSummary.textContent = jsonExport
-        ? `JSON file ready: ${exportFilename}. Nothing has been downloaded yet.`
+        ? `JSON file ready: ${exportFilename}. Nothing has been shared yet.`
         : exportItems.length > 1
         ? `${exportItems.length} Discord messages are ready. Select and copy each one in order.`
         : 'Export ready. Nothing has been copied yet.';
@@ -2080,12 +2070,20 @@ ${body}
     actionButton.addEventListener('click', async () => {
       const index = selectedExportIndex();
       if (jsonExport) {
-        if (downloadJsonFile(exportItems[index] || '', exportFilename)) {
-          outputSummary.textContent = `Downloaded ${exportFilename}. The generated JSON remains available here for another download.`;
+        const result = await shareJsonFile(exportItems[index] || '', exportFilename);
+        if (result === 'shared') {
+          outputSummary.textContent = `Shared ${exportFilename}. The generated JSON remains available here for sharing again.`;
           outputSummary.style.color = '#55d98a';
-          actionButton.textContent = 'Download JSON Again';
+          actionButton.textContent = 'Share JSON Again';
+        } else if (result === 'downloaded') {
+          outputSummary.textContent = `File sharing is unavailable in this browser, so ${exportFilename} was downloaded instead.`;
+          outputSummary.style.color = '#ffcf66';
+          actionButton.textContent = 'Share or Download Again';
+        } else if (result === 'cancelled') {
+          outputSummary.textContent = 'Sharing was cancelled. The JSON remains available here and was not downloaded.';
+          outputSummary.style.color = '#c7cbd1';
         } else {
-          outputSummary.textContent = 'The browser could not start the JSON download. The JSON remains visible below.';
+          outputSummary.textContent = 'The browser could not open file sharing or start the fallback download. The JSON remains visible below.';
           outputSummary.style.color = '#ffcf66';
         }
         return;
@@ -2161,7 +2159,7 @@ ${body}
     buttons.forEach((button) => { button.disabled = true; });
     let config;
     try {
-      config = await configureExport(kind);
+      config = await loadExportConfig();
     } catch (error) {
       buttons.forEach((button) => { button.disabled = false; });
       setStatus(error?.message || 'Export cancelled.');
@@ -2195,8 +2193,8 @@ ${body}
           payload,
         } });
         progressDialog.completeWithExport(payload, { filename });
-        setStatus(kind === 'master' ? 'Master Elimination index ready to download.'
-          : isJson ? 'Full faction JSON ready to download.' : 'Torn HTML ready to copy.', 'success');
+        setStatus(kind === 'master' ? 'Full Elimination JSON ready to share.'
+          : isJson ? 'Full Faction JSON ready to share.' : 'Newsletter HTML ready to copy.', 'success');
       }
     } catch (error) {
       const errorMessage = error?.message || 'Export failed.';
@@ -2205,6 +2203,44 @@ ${body}
     } finally {
       buttons.forEach((button) => { button.disabled = false; });
     }
+  }
+
+  function openExportMenu(masterButton) {
+    global.document.getElementById('tehe-menu-overlay')?.remove();
+    const overlay = global.document.createElement('div');
+    overlay.id = 'tehe-menu-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', 'tehe-menu-title');
+    const optionStyle = 'display:block;width:100%;margin:7px 0 0;padding:10px 11px;box-sizing:border-box;text-align:left;background:#17191d;color:#f2f3f5;border:1px solid #454a52;border-radius:5px;font:700 13px/1.35 Arial,sans-serif;cursor:pointer;';
+    overlay.innerHTML = `<div style="display:block;width:min(92vw,400px);max-height:90vh;overflow:auto;padding:16px;box-sizing:border-box;background:#202225;color:#f2f3f5;border:1px solid #555b64;border-radius:9px;box-shadow:0 14px 45px #000;font-family:Arial,sans-serif;">
+  <div id="tehe-menu-title" style="font-size:17px;font-weight:800;line-height:1.3;">Elimination Export Menu</div>
+  <div style="margin-top:5px;color:#b8bdc5;font-size:12px;line-height:1.45;">Choose one numbered option.</div>
+  <div data-menu-options style="display:block;margin-top:10px;">
+    ${EXPORT_MENU_OPTIONS.map((option, index) => `<button type="button" data-menu-choice="${option.kind}" style="${optionStyle}">${index + 1}) ${escapeHtml(option.label)}</button>`).join('')}
+  </div>
+  <button type="button" data-menu-close style="display:inline-block;margin-top:12px;padding:8px 13px;box-sizing:border-box;background:#34383f;color:#f2f3f5;border:1px solid #5a606a;border-radius:5px;font-weight:700;cursor:pointer;">Close</button>
+</div>`;
+    Object.assign(overlay.style, {
+      position: 'fixed', inset: '0', zIndex: '2147483647', padding: '12px', boxSizing: 'border-box',
+      background: '#000c', display: 'grid', placeItems: 'center',
+    });
+    global.document.body.appendChild(overlay);
+    overlay.querySelector('[data-menu-close]').addEventListener('click', () => overlay.remove());
+    overlay.querySelectorAll('[data-menu-choice]').forEach((choice) => choice.addEventListener('click', async () => {
+      const kind = choice.dataset.menuChoice;
+      overlay.remove();
+      if (kind === 'settings') {
+        try {
+          await configureApiSettings();
+          setStatus('API settings saved.', 'success');
+        } catch (error) {
+          setStatus(error?.message || 'API settings unchanged.');
+        }
+        return;
+      }
+      await runExport(kind, [masterButton]);
+    }));
   }
 
   function findEliminationHeader() {
@@ -2226,16 +2262,13 @@ ${body}
     if (!header) return;
     const panel = global.document.createElement('span');
     panel.id = 'tehe-export-controls';
-    panel.setAttribute('aria-label', 'Elimination exports');
+    panel.setAttribute('aria-label', 'Elimination export menu');
     panel.setAttribute('style', 'display:inline-flex;flex-wrap:wrap;gap:4px;align-items:center;max-width:100%;margin-left:8px;box-sizing:border-box;vertical-align:middle;font:11px Arial,sans-serif;white-space:normal;');
     const buttonStyle = 'display:inline-block;width:auto;min-height:24px;margin:0;padding:3px 6px;box-sizing:border-box;border:1px solid #666b73;border-radius:4px;background:#30343a;color:#f7f7f7;font:700 10px/1.25 Arial,sans-serif;white-space:nowrap;cursor:pointer;';
-    panel.innerHTML = `<button type="button" data-export="newsletter" style="${buttonStyle}" title="${escapeHtml(BUTTON_LABELS.newsletter)}" aria-label="${escapeHtml(BUTTON_LABELS.newsletter)}">HTML Export</button>
-<button type="button" data-export="discord" style="${buttonStyle}" title="${escapeHtml(BUTTON_LABELS.discord)}" aria-label="${escapeHtml(BUTTON_LABELS.discord)}">Discord Export</button>
-<button type="button" data-export="leaderboard" style="${buttonStyle}" title="${escapeHtml(BUTTON_LABELS.leaderboard)}" aria-label="${escapeHtml(BUTTON_LABELS.leaderboard)}">Full Faction Export</button>
-<button type="button" data-export="master" style="${buttonStyle}" title="${escapeHtml(BUTTON_LABELS.master)}" aria-label="${escapeHtml(BUTTON_LABELS.master)}">Master Elim Export</button>
+    panel.innerHTML = `<button type="button" data-export-menu style="${buttonStyle}" title="${escapeHtml(BUTTON_LABELS.menu)}" aria-label="${escapeHtml(BUTTON_LABELS.menu)}">Export Menu</button>
 <span id="tehe-export-status" role="status" style="display:inline-block;max-width:100%;margin-left:3px;color:#9da3ad;font:10px/1.25 Arial,sans-serif;white-space:normal;">Ready.</span>`;
-    const buttons = [...panel.querySelectorAll('button[data-export]')];
-    buttons.forEach((button) => button.addEventListener('click', () => runExport(button.dataset.export, buttons)));
+    const masterButton = panel.querySelector('[data-export-menu]');
+    masterButton.addEventListener('click', () => openExportMenu(masterButton));
     header.appendChild(panel);
   }
 
@@ -2253,6 +2286,7 @@ ${body}
     MAX_CONCURRENT_REQUESTS,
     TOTAL_ELIMINATION_TEAMS,
     BUTTON_LABELS,
+    EXPORT_MENU_OPTIONS,
     TEAM_STYLES,
     STORAGE,
     SHARED_EXPORT,
@@ -2277,6 +2311,7 @@ ${body}
     factionJsonFilename,
     masterJsonFilename,
     downloadJsonFile,
+    shareJsonFile,
     parseFactionIds,
     readHistory,
     readSharedRecord,
